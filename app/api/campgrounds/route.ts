@@ -26,8 +26,8 @@ export async function searchCampgrounds(latitude: number, longitude: number, rad
   const settled = await Promise.allSettled(jobs);
   const successful = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
   if (!successful.length) {
-    const photon = await fetchPhoton(latitude, longitude, Math.min(radius, 120000));
-    return { camps: photon, source: "OpenStreetMap via Photon · live fallback", live: true };
+    const photon = options.nationwide ? await fetchPhotonNationwide() : await fetchPhoton(latitude, longitude, Math.min(radius, 120000));
+    return { camps: photon, source: `OpenStreetMap via Photon · ${options.nationwide ? "nationwide " : ""}live fallback`, live: true };
   }
   const unique = new Map<string, Campground>();
   successful.flatMap((result) => result.camps).forEach((camp) => {
@@ -90,6 +90,13 @@ async function fetchPhoton(latitude: number, longitude: number, radius: number) 
     unique.set(`${props.osm_type}-${props.osm_id}`, feature);
   });
   return [...unique.values()].map((item, index) => normalizePhoton(item, index, latitude, longitude)).filter((camp): camp is Campground => Boolean(camp));
+}
+
+async function fetchPhotonNationwide() {
+  const hubs: Array<[number, number]> = [[37.5665,126.978],[37.7519,128.8761],[36.3504,127.3845],[35.8714,128.6014],[35.1796,129.0756],[35.1595,126.8526],[35.8242,127.148],[33.4996,126.5312]];
+  const settled = await Promise.allSettled(hubs.map(([lat, lon]) => fetchPhoton(lat, lon, 180000)));
+  const unique = new Map<string, Campground>(); settled.forEach((result) => { if (result.status === "fulfilled") result.value.forEach((camp) => unique.set(camp.id, camp)); });
+  return geographicallyDiverse([...unique.values()], 180);
 }
 
 type PhotonFeature = { geometry?: { coordinates?: [number, number] }; properties?: Record<string, string | number> };
