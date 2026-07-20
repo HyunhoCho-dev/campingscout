@@ -15,7 +15,7 @@ export type Campground = {
   rainChance: number;
   gustKph: number;
   facilities: string[];
-  dogFriendly: boolean;
+  dogFriendly: boolean | null;
   status: CampStatus;
   reason: string;
   tradeoff: string;
@@ -44,4 +44,14 @@ export type PlanResponse = {
   packing: string[];
   source: "deepseek-v4-flash" | "demo";
   model?: string;
+  search?: {
+    quiet: number;
+    wild: number;
+    maxDriveMinutes: number;
+    budget: number;
+    dogFriendly: boolean;
+    requiredFacilities: string[];
+  };
+  rankedCampIds?: string[];
+  itinerary?: Array<{ time: string; title: string; detail: string }>;
 };

@@ -20,7 +20,7 @@ export async function POST(request: NextRequest) {
       model: MODEL,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: `Return one JSON object with exactly these keys: summary (string), changes (array of 2-5 strings), packing (array of 3-8 strings). Trip facts:\n${JSON.stringify(payload)}` },
+        { role: "user", content: `Act as both a search controller and trip planner. Return one JSON object with exactly these keys: summary (string), changes (array of 2-5 strings), packing (array of 3-8 strings), search (object with quiet 0-100, wild 0-100, maxDriveMinutes 15-240, budget nonnegative integer KRW, dogFriendly boolean, requiredFacilities string array), rankedCampIds (array containing only candidate IDs, best first), itinerary (array of 3-6 objects with time, title, detail strings). Infer filter changes from the user's command, preserve existing values when not requested, and rank only from supplied candidates. Trip facts:\n${JSON.stringify(payload)}` },
       ],
       response_format: { type: "json_object" },
       temperature: 0.25,
@@ -60,13 +60,27 @@ function parseJson(content: string): unknown {
 
 function validatePlan(value: unknown): Omit<PlanResponse, "source" | "model"> {
   if (!value || typeof value !== "object") throw new Error("The model response was not a JSON object");
-  const item = value as { summary?: unknown; changes?: unknown; packing?: unknown };
+  const item = value as { summary?: unknown; changes?: unknown; packing?: unknown; search?: unknown; rankedCampIds?: unknown; itinerary?: unknown };
   if (typeof item.summary !== "string" || !Array.isArray(item.changes) || !Array.isArray(item.packing)) throw new Error("The model response did not match the plan schema");
   const changes = item.changes.filter((entry): entry is string => typeof entry === "string").slice(0, 5);
   const packing = item.packing.filter((entry): entry is string => typeof entry === "string").slice(0, 8);
   if (changes.length < 2 || packing.length < 3) throw new Error("The model returned an incomplete plan");
-  return { summary: item.summary.slice(0, 1200), changes, packing };
+  const rawSearch = item.search && typeof item.search === "object" ? item.search as Record<string, unknown> : {};
+  const search = {
+    quiet: clampNumber(rawSearch.quiet, 0, 100, 50), wild: clampNumber(rawSearch.wild, 0, 100, 50),
+    maxDriveMinutes: clampNumber(rawSearch.maxDriveMinutes, 15, 240, 120), budget: clampNumber(rawSearch.budget, 0, 10_000_000, 200000),
+    dogFriendly: Boolean(rawSearch.dogFriendly), requiredFacilities: Array.isArray(rawSearch.requiredFacilities) ? rawSearch.requiredFacilities.filter((entry): entry is string => typeof entry === "string").slice(0, 8) : [],
+  };
+  const rankedCampIds = Array.isArray(item.rankedCampIds) ? item.rankedCampIds.filter((entry): entry is string => typeof entry === "string").slice(0, 40) : [];
+  const itinerary = Array.isArray(item.itinerary) ? item.itinerary.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const row = entry as Record<string, unknown>;
+    return typeof row.time === "string" && typeof row.title === "string" && typeof row.detail === "string" ? [{ time: row.time.slice(0, 40), title: row.title.slice(0, 120), detail: row.detail.slice(0, 240) }] : [];
+  }).slice(0, 6) : [];
+  return { summary: item.summary.slice(0, 1200), changes, packing, search, rankedCampIds, itinerary };
 }
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number) { const number = Number(value); return Number.isFinite(number) ? Math.round(Math.max(min, Math.min(max, number))) : fallback; }
 
 function safeProviderMessage(status: number, message: string) {
   if (status === 401) return "OpenRouter API key is invalid or revoked.";
