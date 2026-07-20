@@ -42,5 +42,6 @@ export type PlanResponse = {
   summary: string;
   changes: string[];
   packing: string[];
-  source: "gpt-5.6" | "demo";
+  source: "deepseek-v4-flash" | "demo";
+  model?: string;
 };

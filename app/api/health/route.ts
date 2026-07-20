@@ -7,7 +7,8 @@ export async function GET() {
     ok: true,
     runtime: "cloudflare-workers",
     integrations: {
-      openai: Boolean(process.env.OPENAI_API_KEY),
+      openrouter: Boolean(process.env.OPENROUTER_API_KEY),
+      aiModel: process.env.OPENROUTER_MODEL || "deepseek/deepseek-v4-flash",
       gocamping: Boolean(process.env.GOCAMPING_SERVICE_KEY),
       mapbox: Boolean(process.env.MAPBOX_ACCESS_TOKEN),
       weather: true,

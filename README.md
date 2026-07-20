@@ -8,14 +8,15 @@ CampingScout is an evidence-aware AI camping planner built for OpenAI Build Week
 
 ## Why it matters
 
-Camping search is fragmented across campground directories, weather pages, maps, operator sites, and gear checklists. CampingScout combines those inputs but keeps their provenance visible: public-data facts, live forecasts, routing results, and GPT recommendations are labeled separately. It never presents AI inference as live availability or official safety advice.
+Camping search is fragmented across campground directories, weather pages, maps, operator sites, and gear checklists. CampingScout combines those inputs but keeps their provenance visible: public-data facts, live forecasts, routing results, and AI recommendations are labeled separately. It never presents AI inference as live availability or official safety advice.
 
 ## Product capabilities
 
 - Live Korea Tourism Organization GoCamping search with a curated fallback
 - Mapbox Directions and Isochrone routing with an honest estimated fallback
 - Open-Meteo weather and sleeping-bag comfort mismatch warnings
-- GPT-5.6 structured trip changes and packing recommendations
+- DeepSeek V4 Flash through OpenRouter for structured trip and packing recommendations
+- Temporary in-app OpenRouter key connection stored only in browser session storage
 - Sign in with ChatGPT on OpenAI Sites
 - Cloudflare D1 profile and saved-trip persistence
 - Public, unguessable trip share links
@@ -30,7 +31,8 @@ Browser (Next/Vinext UI + MapLibre)
   ├─ /api/campgrounds  → KTO GoCamping public data
   ├─ /api/navigation   → Mapbox Directions + Isochrone
   ├─ /api/weather      → Open-Meteo
-  ├─ /api/plan         → OpenAI Responses API (GPT-5.6)
+  ├─ /api/plan         → OpenRouter (DeepSeek V4 Flash)
+  ├─ /api/openrouter/test → real provider connection test
   ├─ /api/profile      → Sign in with ChatGPT + D1
   └─ /api/trips        → Sign in with ChatGPT + D1 + share route
 ```
@@ -43,14 +45,14 @@ Copy `.env.example` to `.env.local` for local development, or set these in the d
 
 | Variable | Required for live mode | Purpose |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | Yes | Server-side OpenAI Responses API calls |
-| `OPENAI_MODEL` | No | Defaults to `gpt-5.6` |
+| `OPENROUTER_API_KEY` | Optional | Server-wide OpenRouter key; users may instead connect a temporary key in the UI |
+| `OPENROUTER_MODEL` | No | Defaults to `deepseek/deepseek-v4-flash` |
 | `GOCAMPING_SERVICE_KEY` | Yes | data.go.kr GoCamping service key |
 | `MAPBOX_ACCESS_TOKEN` | Yes | Server-side Directions/Isochrone requests |
 | `NEXT_PUBLIC_MAP_STYLE_URL` | No | Optional MapLibre-compatible map style |
 | `NEXT_PUBLIC_SITE_URL` | Production | Canonical URL and shared-page server fetches |
 
-`OPENAI_API_KEY`, `GOCAMPING_SERVICE_KEY`, and `MAPBOX_ACCESS_TOKEN` must be stored as deployment secrets. Never prefix them with `NEXT_PUBLIC_`.
+`OPENROUTER_API_KEY`, `GOCAMPING_SERVICE_KEY`, and `MAPBOX_ACCESS_TOKEN` must be stored as deployment secrets. Never prefix them with `NEXT_PUBLIC_`. A key entered in the app is sent only to the same-origin server route and retained only in that tab's `sessionStorage` after a successful live test.
 
 ## Local development
 
@@ -72,7 +74,7 @@ npm audit --omit=dev
 
 The repository works without private keys for judgeability. Every integration returns a labeled deterministic fallback when its key/provider is unavailable. A live deployment becomes fully connected by setting environment variables—no code changes are required.
 
-- GPT fallback never claims to be GPT-5.6.
+- AI fallback never claims to be a live DeepSeek response.
 - GoCamping fallback is labeled as demo/curated data.
 - Routing fallback is labeled estimated and does not invent an isochrone.
 - Weather falls back to the campground snapshot and is labeled non-live.
@@ -84,7 +86,7 @@ The repository works without private keys for judgeability. Every integration re
 - Database records are scoped to the authenticated email header supplied by the hosting platform.
 - Share tokens are random 80-bit URL tokens and reveal only the selected trip payload.
 - Inputs are type/range checked before provider calls; external links use `rel="noreferrer"`.
-- GPT receives supplied trip facts and is instructed not to invent policies, availability, weather, or safety claims.
+- DeepSeek receives supplied trip facts and is instructed not to invent policies, availability, weather, prices, routes, or safety claims.
 - Users are repeatedly asked to verify operator policies, official alerts, and availability.
 
 This is a planning assistant, not an emergency, weather-warning, or reservation service.
