@@ -183,7 +183,7 @@ export function ScoutDashboard() {
       const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(openRouterKey ? { "X-OpenRouter-Key": openRouterKey } : {}) },
-        body: JSON.stringify({ command: prompt, preference, profile, trip: searchTrip, selectedCampId, searchArea: searchTrip.scope === "drawn" ? searchArea : null, user: session?.user ? { displayName: session.user.displayName } : null }),
+        body: JSON.stringify({ command: prompt, preference, profile, trip: searchTrip, selectedCampId, candidateSnapshot: camps.slice(0, 60), searchArea: searchTrip.scope === "drawn" ? searchArea : null, user: session?.user ? { displayName: session.user.displayName } : null }),
       });
       const result = await response.json() as { camps?: Campground[]; plan?: PlanResponse; source?: string; counts?: { discovered: number; routed: number; weather: number; ranked: number; places?: number }; error?: string };
       if (!response.ok || result.error) throw new Error(result.error || "AI planning failed");

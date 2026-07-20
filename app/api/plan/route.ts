@@ -62,7 +62,7 @@ export function openRouter(apiKey: string) {
   return new OpenAI({
     apiKey,
     baseURL: "https://openrouter.ai/api/v1",
-    timeout: 30_000,
+    timeout: 25_000,
     maxRetries: 0,
     defaultHeaders: {
       "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://campingscout-wild.hyunhocho123.chatgpt.site",

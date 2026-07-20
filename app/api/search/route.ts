@@ -20,6 +20,7 @@ type SearchIntent = {
 export async function POST(request: NextRequest) {
   const payload = await request.json() as Record<string, unknown> & {
     command?: unknown;
+    candidateSnapshot?: unknown;
     searchArea?: unknown;
     trip?: { origin?: unknown; maxDriveMinutes?: unknown; budget?: unknown; startDate?: unknown; endDate?: unknown; scope?: unknown };
     preference?: { quiet?: unknown; wild?: unknown };
@@ -36,16 +37,18 @@ export async function POST(request: NextRequest) {
     const polygon = validPolygon(payload.searchArea) ? payload.searchArea : undefined;
     const nationwide = payload.trip?.scope === "nationwide" && !polygon;
     const selectedCampId = typeof payload.selectedCampId === "string" ? payload.selectedCampId : undefined;
-    const factual = await searchCampgrounds(origin[1], origin[0], preliminaryRadius, { nationwide, polygon });
+    const snapshot = validCampSnapshot(payload.candidateSnapshot);
+    const factual = snapshot.length >= 4 ? { camps: snapshot, source: "Recent live campground snapshot", live: true } : await searchCampgrounds(origin[1], origin[0], preliminaryRadius, { nationwide, polygon });
     const intent = intentFromInput(payload);
     if (!factual.camps.length) return NextResponse.json({ error: "No live campground records were found for this search area", source: factual.source }, { status: 404 });
 
-    const baseTargets = nationwide ? geographicallyDiverse(factual.camps, 24) : factual.camps.slice(0, 24);
+    const baseTargets = nationwide ? geographicallyDiverse(factual.camps, 16) : factual.camps.slice(0, 16);
     const selectedTarget = selectedCampId ? factual.camps.find((camp) => camp.id === selectedCampId) : undefined;
-    const routeTargets = selectedTarget ? [selectedTarget, ...baseTargets.filter((camp) => camp.id !== selectedTarget.id)].slice(0, 24) : baseTargets;
-    const routed = await enrichRoutes(origin, routeTargets);
+    const routeTargets = selectedTarget ? [selectedTarget, ...baseTargets.filter((camp) => camp.id !== selectedTarget.id)].slice(0, 16) : baseTargets;
+    const nearbyTargets = (selectedTarget ? [selectedTarget, ...baseTargets.filter((camp) => camp.id !== selectedTarget.id)] : baseTargets).slice(0, 2);
+    const [routed, nearbyGroups] = await Promise.all([enrichRoutes(origin, routeTargets), Promise.all(nearbyTargets.map((camp) => fetchNearbyPlaces(camp.id, camp.coordinates)))]);
     const withinDrive = routed.filter((camp) => !camp.driveMinutes || camp.driveMinutes <= intent.maxDriveMinutes + 15);
-    const candidates = (withinDrive.length >= 8 ? withinDrive : routed).slice(0, 24);
+    const candidates = (withinDrive.length >= 8 ? withinDrive : routed).slice(0, 16);
     const weatherEnriched = forecastIsAvailable(String(payload.trip?.startDate || "")) ? await enrichWeather(candidates, String(payload.trip?.startDate || ""), String(payload.trip?.endDate || "")) : candidates;
     const candidateFacts = weatherEnriched.map((camp) => ({
       id: camp.id, name: camp.name, area: camp.area, landscape: camp.landscape,
@@ -54,7 +57,7 @@ export async function POST(request: NextRequest) {
       rainChance: camp.rainChance || null, gustKph: camp.gustKph || null, bookingUrl: camp.bookingUrl || null, source: camp.source,
       dataCompleteness: (camp.name && !/^Campground \d+$/i.test(camp.name) ? 1 : 0) + (camp.area !== "Korea" ? 1 : 0) + (camp.facilities[0] !== "Verify facilities" ? 1 : 0) + (camp.bookingUrl ? 1 : 0) + (camp.dogFriendly !== null ? 1 : 0),
     }));
-    const nearby = (await Promise.all(weatherEnriched.slice(0, 3).map((camp) => fetchNearbyPlaces(camp.id, camp.coordinates)))).flat();
+    const nearby = nearbyGroups.flat();
     const rawPlan = await completeJson(client, [
       { role: "system", content: "You are CamperLife, an evidence-aware camping search ranker. Use only supplied live candidates, road metrics, weather, profile, map area, and trip facts. Never invent facts. Unknown pet policy is not proof of dog friendliness. Respond only in English." },
       { role: "user", content: `Rank the factual candidates and build the complete trip plan in one response. Return strict JSON with summary, changes (2-5 strings), packing (3-8 strings), search (the supplied intent fields), rankedCampIds (candidate IDs only, best first), recommendations (top 12 objects: id, score 0-100, reason, tradeoff, quiet 0-100, wild 0-100), itinerary (4-8 objects: time, title, detail), and routeStopIds (0-5 supplied place IDs in visit order). If selectedCampId is supplied and exists in the facts, rank it first unless a supplied hard fact makes it unsafe or impossible. Route stops must belong to the campground ranked first, avoid excessive detours, and normally include at most one restaurant. Make every explanation traceable to supplied facts and mark facts requiring operator verification. Prefer identifiable records with higher dataCompleteness.\nSearch intent:${JSON.stringify(intent)}\nTraveler input:${JSON.stringify(payload)}\nLive candidate facts:${JSON.stringify(candidateFacts)}\nLive nearby places:${JSON.stringify(nearby)}` },
@@ -96,7 +99,7 @@ type NearbyPlace = { id: string; campId: string; type: "attraction" | "restauran
 async function fetchNearbyPlaces(campId: string, [longitude, latitude]: [number, number]): Promise<NearbyPlace[]> {
   const query = `[out:json][timeout:16];(nwr(around:18000,${latitude},${longitude})["tourism"~"attraction|museum|viewpoint|theme_park|zoo|gallery"]["name"];nwr(around:12000,${latitude},${longitude})["amenity"="restaurant"]["name"];);out tags center qt 70;`;
   try {
-    const response = await fetch("https://overpass.kumi.systems/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" }, body: new URLSearchParams({ data: query }), signal: AbortSignal.timeout(9000) });
+    const response = await fetch("https://overpass.kumi.systems/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" }, body: new URLSearchParams({ data: query }), signal: AbortSignal.timeout(7000) });
     if (!response.ok) return []; const data = await response.json() as { elements?: Array<{ type: string; id: number; lat?: number; lon?: number; center?: { lat?: number; lon?: number }; tags?: Record<string, string> }> };
     return (data.elements || []).flatMap((item) => {
       const lat = item.lat ?? item.center?.lat; const lon = item.lon ?? item.center?.lon; const tags = item.tags || {}; if (!Number.isFinite(lat) || !Number.isFinite(lon) || !tags.name) return [];
@@ -115,19 +118,14 @@ function applyRoutePlan(plan: Omit<PlanResponse, "source" | "model">, value: unk
 }
 
 async function completeJson(client: OpenAI, messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]) {
-  let completion = await client.chat.completions.create({ model: MODEL, messages, response_format: { type: "json_object" }, temperature: 0.15, max_tokens: 1800 });
-  let content = completion.choices[0]?.message?.content || "";
-  try { return parseJson(content); } catch {
-    completion = await client.chat.completions.create({ model: MODEL, messages: [...messages, { role: "assistant", content }, { role: "user", content: "Return the same result again as one complete strict JSON object only. No markdown or reasoning." }], response_format: { type: "json_object" }, temperature: 0, max_tokens: 2200 });
-    content = completion.choices[0]?.message?.content || "";
-    return parseJson(content);
-  }
+  const completion = await client.chat.completions.create({ model: MODEL, messages, response_format: { type: "json_object" }, temperature: 0.1, max_tokens: 1600 });
+  return parseJson(completion.choices[0]?.message?.content || "");
 }
 
 async function enrichRoutes(origin: [number, number], camps: Campground[]) {
   try {
     const coordinates = [origin, ...camps.map((camp) => camp.coordinates)].map((item) => `${item[0]},${item[1]}`).join(";");
-    const response = await fetch(`https://router.project-osrm.org/table/v1/driving/${coordinates}?sources=0&annotations=duration,distance`, { headers: { "User-Agent": "CamperLife/1.0" }, signal: AbortSignal.timeout(25000) });
+    const response = await fetch(`https://router.project-osrm.org/table/v1/driving/${coordinates}?sources=0&annotations=duration,distance`, { headers: { "User-Agent": "CamperLife/1.0" }, signal: AbortSignal.timeout(12000) });
     if (!response.ok) throw new Error(`OSRM table returned ${response.status}`);
     const data = await response.json() as { code?: string; durations?: Array<Array<number | null>>; distances?: Array<Array<number | null>> };
     if (data.code !== "Ok") throw new Error("OSRM table did not return routes");
@@ -181,6 +179,14 @@ function parseJson(content: string) { const cleaned = content.trim().replace(/^`
 function clamp(value: unknown, min: number, max: number, fallback: number) { const number = Number(value); return Number.isFinite(number) ? Math.round(Math.max(min, Math.min(max, number))) : fallback; }
 function validCoordinate(value: unknown): value is [number, number] { return Array.isArray(value) && value.length === 2 && Number.isFinite(value[0]) && Number.isFinite(value[1]) && Math.abs(value[0]) <= 180 && Math.abs(value[1]) <= 90; }
 function validPolygon(value: unknown): value is [number, number][] { return Array.isArray(value) && value.length >= 3 && value.length <= 30 && value.every(validCoordinate); }
+function validCampSnapshot(value: unknown): Campground[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return []; const camp = entry as Campground;
+    if (typeof camp.id !== "string" || typeof camp.name !== "string" || !validCoordinate(camp.coordinates) || !/^(OpenStreetMap|GoCamping)/.test(String(camp.source || ""))) return [];
+    return [{ ...camp, name: camp.name.slice(0, 160), area: String(camp.area || "Korea").slice(0, 240), facilities: Array.isArray(camp.facilities) ? camp.facilities.filter((item): item is string => typeof item === "string").slice(0, 8) : ["Verify facilities"] }];
+  }).slice(0, 60);
+}
 function forecastIsAvailable(startDate: string) { const start = /^\d{4}-\d{2}-\d{2}$/.test(startDate) ? Date.parse(`${startDate}T00:00:00+09:00`) : Date.now(); const days = (start - Date.now()) / 86_400_000; return days >= -1 && days <= 9; }
 function geographicallyDiverse(camps: Campground[], limit: number) {
   const buckets = new Map<string, Campground[]>(); camps.forEach((camp) => { const key = `${Math.floor(camp.coordinates[1] * 2)}:${Math.floor(camp.coordinates[0] * 2)}`; buckets.set(key, [...(buckets.get(key) || []), camp]); });
