@@ -225,6 +225,13 @@ export async function POST(request: NextRequest) {
       reason: "Required by the traveler",
     }));
     const nearby = [...requiredPlaces, ...nearbyGroups.flat()];
+    const travelerContext = {
+      command: payload.command,
+      preference: payload.preference,
+      profile: payload.profile,
+      trip: payload.trip,
+      user: payload.user,
+    };
     let aiUsed = true;
     let rawPlan: unknown;
     try {
@@ -237,7 +244,7 @@ export async function POST(request: NextRequest) {
           },
           {
             role: "user",
-            content: `Return strict JSON with summary, changes, packing, search, rankedCampIds, recommendations (top 6: id, score, reason, tradeoff, quiet, wild), itinerary (4-20 items), and routeStopIds (0-5 supplied place IDs). The itinerary must cover the complete selected range of ${intent.days} days and ${intent.nights} nights. Every calendar day needs at least one itinerary item. Every must-visit place is mandatory in routeStopIds and must influence campground ranking. If selectedCampId exists, rank it first unless a hard supplied fact makes it unsafe. Include at most one restaurant.\nIntent:${JSON.stringify(intent)}\nTraveler:${JSON.stringify(payload)}\nRequiredStops:${JSON.stringify(requiredStops)}\nCamps:${JSON.stringify(candidateFacts)}\nPlaces:${JSON.stringify(nearby)}`,
+            content: `Return strict JSON with summary, changes, packing, search, rankedCampIds, recommendations (top 6: id, score, reason, tradeoff, quiet, wild), itinerary (4-20 items), and routeStopIds (0-5 supplied place IDs). The itinerary must cover the complete selected range of ${intent.days} days and ${intent.nights} nights. Every calendar day needs at least one itinerary item. Every must-visit place is mandatory in routeStopIds and must influence campground ranking. If selectedCampId exists, rank it first unless a hard supplied fact makes it unsafe. Include at most one restaurant.\nIntent:${JSON.stringify(intent)}\nTraveler:${JSON.stringify(travelerContext)}\nRequiredStops:${JSON.stringify(requiredStops)}\nCamps:${JSON.stringify(candidateFacts)}\nPlaces:${JSON.stringify(nearby)}`,
           },
         ]),
         10_000,
