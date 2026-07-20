@@ -5,10 +5,6 @@ import maplibregl, { type Map as MapLibreMap, type Marker } from "maplibre-gl";
 import type { LineString, Polygon } from "geojson";
 import type { Campground, RouteStop } from "@/lib/types";
 
-const pinColors: Record<Campground["status"], string> = {
-  best: "#159bd7", safe: "#56b4df", wild: "#8b62af", verify: "#d99b45", risk: "#ce4f4f",
-};
-
 type Props = {
   camps: Campground[];
   selected: Campground;
@@ -81,13 +77,13 @@ export function CampMap({ camps, selected, onSelect, origin, route, reach, stops
     const campMarkers = camps.map((camp) => {
       const button = document.createElement("button");
       button.className = `map-pin${camp.id === selected.id ? " map-pin--selected" : ""}`;
-      button.style.setProperty("--pin-color", pinColors[camp.status]); button.setAttribute("aria-label", `View ${camp.name}`);
-      button.innerHTML = `<span aria-hidden="true">⌁</span>`; button.addEventListener("click", () => onSelectRef.current(camp));
+      button.style.setProperty("--pin-color", camp.id === selected.id ? "#087fbd" : "#42b5e3"); button.setAttribute("aria-label", `Campground: ${camp.name}`);
+      button.innerHTML = `<span aria-hidden="true">⛺</span>`; button.addEventListener("click", () => onSelectRef.current(camp));
       return new maplibregl.Marker({ element: button, anchor: "bottom" }).setLngLat(camp.coordinates).addTo(map);
     });
     const stopMarkers = stops.map((stop) => {
       const marker = document.createElement("button"); marker.className = `poi-pin poi-pin--${stop.type}`;
-      marker.setAttribute("aria-label", `${stop.visitOrder}. ${stop.name}`); marker.textContent = stop.type === "restaurant" ? "🍽" : "★";
+      marker.setAttribute("aria-label", `${stop.type}: ${stop.visitOrder}. ${stop.name}`); marker.innerHTML = `<span aria-hidden="true">${stop.type === "restaurant" ? "🍽" : "★"}</span>`;
       marker.title = `${stop.visitOrder}. ${stop.name} — ${stop.reason}`;
       return new maplibregl.Marker({ element: marker, anchor: "bottom" }).setLngLat(stop.coordinates).addTo(map);
     });

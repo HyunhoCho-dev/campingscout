@@ -70,6 +70,8 @@ export function ScoutDashboard() {
   const [saving, setSaving] = useState(false);
   const [command, setCommand] = useState("");
   const [thinking, setThinking] = useState(false);
+  const [searchProgress, setSearchProgress] = useState(0);
+  const [searchStage, setSearchStage] = useState("Preparing your search");
   const [aiPlan, setAiPlan] = useState<PlanResponse | null>(null);
   const [toast, setToast] = useState("");
 
@@ -145,6 +147,16 @@ export function ScoutDashboard() {
   useEffect(() => { if (storageReady) window.localStorage.setItem("campingscout-trip", JSON.stringify(trip)); }, [trip, storageReady]);
   useEffect(() => { if (storageReady) window.localStorage.setItem("camperlife-search-area", JSON.stringify(searchArea)); }, [searchArea, storageReady]);
 
+  useEffect(() => {
+    if (!thinking) return;
+    const timer = window.setInterval(() => setSearchProgress((value) => {
+      const next = Math.min(92, value + (value < 35 ? 7 : value < 70 ? 4 : 2));
+      setSearchStage(next < 25 ? "Loading live campgrounds" : next < 50 ? "Calculating road travel times" : next < 72 ? "Comparing matches with AI" : next < 88 ? "Finding nearby food and attractions" : "Building your map route");
+      return next;
+    }), 850);
+    return () => window.clearInterval(timer);
+  }, [thinking]);
+
   const lowC = weather?.lowC ?? selected.lowC;
   const gearMismatch = lowC !== 0 && lowC < profile.sleepingBagComfortC;
 
@@ -162,14 +174,16 @@ export function ScoutDashboard() {
     await runScout(command.trim());
   }
 
-  async function runScout(prompt: string, searchTrip = trip) {
+  async function runScout(prompt: string, searchTrip = trip, selectedCampId?: string) {
     setThinking(true);
+    setSearchProgress(6);
+    setSearchStage("Loading live campgrounds");
     setDataSource("Scout is interpreting your profile and collecting live candidates…");
     try {
       const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(openRouterKey ? { "X-OpenRouter-Key": openRouterKey } : {}) },
-        body: JSON.stringify({ command: prompt, preference, profile, trip: searchTrip, searchArea: searchTrip.scope === "drawn" ? searchArea : null, user: session?.user ? { displayName: session.user.displayName } : null }),
+        body: JSON.stringify({ command: prompt, preference, profile, trip: searchTrip, selectedCampId, searchArea: searchTrip.scope === "drawn" ? searchArea : null, user: session?.user ? { displayName: session.user.displayName } : null }),
       });
       const result = await response.json() as { camps?: Campground[]; plan?: PlanResponse; source?: string; counts?: { discovered: number; routed: number; weather: number; ranked: number; places?: number }; error?: string };
       if (!response.ok || result.error) throw new Error(result.error || "AI planning failed");
@@ -186,6 +200,8 @@ export function ScoutDashboard() {
       }
       setDataSource(`${result.source || "Live AI search"} · ${result.counts?.discovered || result.camps.length} found / ${result.counts?.ranked || result.camps.length} AI-ranked`);
       setAiConnected(result.plan.source === "deepseek-v4-flash");
+      setSearchProgress(100);
+      setSearchStage("Trip ready");
       setPlanOpen(true);
       setCommand("");
     } catch (error) {
@@ -194,6 +210,11 @@ export function ScoutDashboard() {
     } finally {
       setThinking(false);
     }
+  }
+
+  async function openLivePlan() {
+    setPlanOpen(true);
+    await runScout("Create a fresh, detailed trip plan for the selected campground using every current trip setting and profile choice. Select real nearby attractions and restaurants, and return the exact route stops to display on the map.", trip, selected.id);
   }
 
   async function searchFromSettings(nextTrip: TripSettings) {
@@ -244,6 +265,8 @@ export function ScoutDashboard() {
 
   const dateLabel = `${new Date(`${trip.startDate}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })}–${new Date(`${trip.endDate}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
 
+  if (!storageReady) return <main className="app-boot" aria-live="polite"><span className="spinner spinner--blue" /><strong>Loading CamperLife…</strong></main>;
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -284,6 +307,7 @@ export function ScoutDashboard() {
         <section className="map-stage">
           <CampMap camps={visibleCamps} selected={selected} onSelect={chooseCamp} route={navigation?.route} reach={navigation?.reach} origin={trip.origin} stops={aiPlan?.routeStops} drawMode={drawMode} searchArea={searchArea} onAreaChange={acceptSearchArea} />
           <div className="reach-legend"><span className="reach-swatch" /><span><strong>Selected road route</strong><small>{navigation?.live ? `live ${navigation.source}` : "Calculating actual route…"}</small></span></div>
+          <div className="marker-legend" aria-label="Map marker legend"><span><i className="legend-camp">⛺</i> Campground</span><span><i className="legend-attraction">★</i> Attraction</span><span><i className="legend-food">🍽</i> Restaurant</span></div>
           <button className="locate-button" aria-label="Center on my location"><LocateFixed size={19} /></button>
           <button className={drawMode ? "draw-area-button draw-area-button--active" : "draw-area-button"} onClick={() => setDrawMode((value) => !value)} aria-pressed={drawMode}><Pencil size={17} />{drawMode ? "Click 3+ points · double-click to finish" : "Draw search area"}</button>
           {mapCardOpen && <div className="selected-map-card">
@@ -297,6 +321,7 @@ export function ScoutDashboard() {
             <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="Ask Scout to change this trip…" aria-label="Ask Scout" />
             <button disabled={thinking} aria-label="Send to Scout">{thinking ? <span className="spinner" /> : <Navigation size={17} />}</button>
           </form>
+          {thinking && <div className="search-progress" role="status" aria-live="polite"><div><span><Sparkles size={16} /> {searchStage}</span><strong>{searchProgress}%</strong></div><progress max="100" value={searchProgress} /><small>Live data and AI providers can vary by a few seconds.</small></div>}
         </section>
 
         <aside className="right-panel">
@@ -323,11 +348,11 @@ export function ScoutDashboard() {
           </div>
 
           <div className="why-card"><div><Sparkles size={17} /><strong>Why Scout picked it</strong></div><p>{selected.reason}</p><small><Info size={13} /> {selected.source}</small></div>
-          <div className="panel-actions"><button className="primary" onClick={() => setPlanOpen(true)}>View trip plan <Route size={17} /></button>{selected.bookingUrl ? <a className="secondary" href={selected.bookingUrl} target="_blank" rel="noreferrer">Check availability <ExternalLink size={17} /></a> : <button className="secondary" onClick={() => setToast("No verified booking link · confirm with the operator")}>Verify booking <ExternalLink size={17} /></button>}<button className="secondary" disabled={thinking} onClick={() => runScout("Find a genuinely warmer campground from the supplied candidates. Do not claim a temperature unless live weather data supports it; otherwise explain what must be verified.")}>Ask Scout for a warmer option <Thermometer size={17} /></button></div>
+          <div className="panel-actions"><button className="primary" disabled={thinking} onClick={openLivePlan}>{thinking ? "AI is building your plan…" : "Build live trip plan"} <Route size={17} /></button>{selected.bookingUrl ? <a className="secondary" href={selected.bookingUrl} target="_blank" rel="noreferrer">Check availability <ExternalLink size={17} /></a> : <button className="secondary" onClick={() => setToast("No verified booking link · confirm with the operator")}>Verify booking <ExternalLink size={17} /></button>}<button className="secondary" disabled={thinking} onClick={() => runScout("Find a genuinely warmer campground from the supplied candidates. Do not claim a temperature unless live weather data supports it; otherwise explain what must be verified.")}>Ask Scout for a warmer option <Thermometer size={17} /></button></div>
         </aside>
       </section>
 
-      {planOpen && <PlanDrawer selected={selected} aiPlan={aiPlan} weather={weather} saving={saving} onSave={saveAndShareTrip} onClose={() => setPlanOpen(false)} />}
+      {planOpen && <PlanDrawer selected={selected} aiPlan={aiPlan} weather={weather} loading={thinking} progress={searchProgress} stage={searchStage} saving={saving} onSave={saveAndShareTrip} onClose={() => setPlanOpen(false)} />}
       {compareOpen && <CompareModal camps={visibleCamps.slice(0, 3)} selected={selected} onSelect={(camp) => { chooseCamp(camp); setCompareOpen(false); }} onClose={() => setCompareOpen(false)} />}
       {profileOpen && <ProfileModal profile={profile} onSave={saveProfile} onClose={() => setProfileOpen(false)} />}
       {settingsOpen && <TripSettingsModal settings={trip} searching={thinking} onSave={searchFromSettings} onClose={() => setSettingsOpen(false)} />}
@@ -349,10 +374,10 @@ function Fact({ icon, value, detail }: { icon: React.ReactNode; value: string; d
 
 function labelForStatus(status: Campground["status"]) { return ({ best: "Best Match", safe: "Safe Choice", wild: "Wild Card", verify: "Verify", risk: "Not a fit" })[status]; }
 
-function PlanDrawer({ selected, aiPlan, weather, saving, onSave, onClose }: { selected: Campground; aiPlan: PlanResponse | null; weather: WeatherSnapshot | null; saving: boolean; onSave: () => void; onClose: () => void }) {
+function PlanDrawer({ selected, aiPlan, weather, loading, progress, stage, saving, onSave, onClose }: { selected: Campground; aiPlan: PlanResponse | null; weather: WeatherSnapshot | null; loading: boolean; progress: number; stage: string; saving: boolean; onSave: () => void; onClose: () => void }) {
   const packing = aiPlan?.packing ?? ["Warmer sleeping bag or liner", "Waterproof shell", "Dog lead and bowl", "Headlamp", "Offline map", "2L water per traveler"];
   const itinerary = aiPlan?.itinerary?.length ? aiPlan.itinerary : [{ time: "FRI · 18:00", title: "Leave origin", detail: "Snacks and fuel before departure" }, { time: "ARRIVAL", title: "Arrive and set up", detail: "Pitch before sunset" }, { time: "DAY 2 · 09:00", title: "Explore nearby", detail: `Weather window: ${weather?.rainChance ?? selected.rainChance}% rain` }, { time: "FINAL · 10:00", title: "Pack and head home", detail: "Leave no trace check" }];
-  return <div className="overlay"><section className="drawer" role="dialog" aria-modal="true" aria-label="Trip plan"><div className="drawer-head"><div><span className="eyebrow">Ready to roam</span><h2>Your {selected.name} plan</h2></div><button className="icon-button" onClick={onClose} aria-label="Close plan"><X /></button></div>{aiPlan && <div className="ai-summary"><Sparkles size={18} /><div><strong>CamperLife AI · {aiPlan.source === "deepseek-v4-flash" ? "DeepSeek V4 Flash · live" : "Offline preview"}</strong><p>{aiPlan.summary}</p></div></div>}<div className="plan-route">{itinerary.map((item, index) => <div key={`${item.time}-${index}`}><span>{item.time}</span><strong>{item.title}</strong><small>{item.detail}</small></div>)}</div>{Boolean(aiPlan?.routeStops?.length) && <><h3>AI-selected places on your route</h3><div className="route-stops">{aiPlan!.routeStops!.map((stop) => <article key={stop.id}><span>{stop.type === "restaurant" ? "🍽" : "★"}</span><div><strong>{stop.visitOrder}. {stop.name}</strong><small>{stop.area} · {stop.reason}</small></div></article>)}</div></>}<h3>Scout’s packing list</h3><div className="packing-grid">{packing.map((item) => <label key={item}><input type="checkbox" /><span>{item}</span></label>)}</div><div className="source-note"><ShieldCheck size={16} /><span>Weather, campsites, restaurants and attractions come from live/public sources when available. Confirm hours, alerts and booking policies before departure.</span></div><button className="primary full" onClick={onSave} disabled={saving}>{saving ? "Saving…" : "Save & copy share link"} <Share2 size={17} /></button></section></div>;
+  return <div className="overlay"><section className="drawer" role="dialog" aria-modal="true" aria-label="Trip plan"><div className="drawer-head"><div><span className="eyebrow">Ready to roam</span><h2>Your {selected.name} plan</h2></div><button className="icon-button" onClick={onClose} aria-label="Close plan"><X /></button></div>{loading ? <div className="ai-summary ai-summary--loading"><span className="spinner spinner--blue" /><div><strong>{stage} · {progress}%</strong><progress max="100" value={progress} /><p>CamperLife is ranking camps and selecting real attractions and restaurants for the map.</p></div></div> : aiPlan && <div className="ai-summary"><Sparkles size={18} /><div><strong>CamperLife AI · {aiPlan.source === "deepseek-v4-flash" ? "DeepSeek V4 Flash · live" : "Offline preview"}</strong><p>{aiPlan.summary}</p></div></div>}<div className="plan-route">{itinerary.map((item, index) => <div key={`${item.time}-${index}`}><span>{item.time}</span><strong>{item.title}</strong><small>{item.detail}</small></div>)}</div>{Boolean(aiPlan?.routeStops?.length) && <><h3>AI-selected places on your route</h3><div className="route-stops">{aiPlan!.routeStops!.map((stop) => <article key={stop.id}><span>{stop.type === "restaurant" ? "🍽" : "★"}</span><div><strong>{stop.visitOrder}. {stop.name}</strong><small>{stop.area} · {stop.reason}</small></div></article>)}</div></>}<h3>Scout’s packing list</h3><div className="packing-grid">{packing.map((item) => <label key={item}><input type="checkbox" /><span>{item}</span></label>)}</div><div className="source-note"><ShieldCheck size={16} /><span>Weather, campsites, restaurants and attractions come from live/public sources when available. Confirm hours, alerts and booking policies before departure.</span></div><button className="primary full" onClick={onSave} disabled={saving || loading}>{saving ? "Saving…" : "Save & copy share link"} <Share2 size={17} /></button></section></div>;
 }
 
 function CompareModal({ camps, selected, onSelect, onClose }: { camps: Campground[]; selected: Campground; onSelect: (camp: Campground) => void; onClose: () => void }) {

@@ -35,11 +35,15 @@ export async function POST(request: NextRequest) {
     const preliminaryRadius = Math.min(200000, Math.max(50000, preliminaryDrive * 1300));
     const polygon = validPolygon(payload.searchArea) ? payload.searchArea : undefined;
     const nationwide = payload.trip?.scope === "nationwide" && !polygon;
+    const selectedCampId = typeof payload.selectedCampId === "string" ? payload.selectedCampId : undefined;
     const factual = await searchCampgrounds(origin[1], origin[0], preliminaryRadius, { nationwide, polygon });
     const intent = intentFromInput(payload);
     if (!factual.camps.length) return NextResponse.json({ error: "No live campground records were found for this search area", source: factual.source }, { status: 404 });
 
-    const routed = await enrichRoutes(origin, nationwide ? geographicallyDiverse(factual.camps, 24) : factual.camps.slice(0, 24));
+    const baseTargets = nationwide ? geographicallyDiverse(factual.camps, 24) : factual.camps.slice(0, 24);
+    const selectedTarget = selectedCampId ? factual.camps.find((camp) => camp.id === selectedCampId) : undefined;
+    const routeTargets = selectedTarget ? [selectedTarget, ...baseTargets.filter((camp) => camp.id !== selectedTarget.id)].slice(0, 24) : baseTargets;
+    const routed = await enrichRoutes(origin, routeTargets);
     const withinDrive = routed.filter((camp) => !camp.driveMinutes || camp.driveMinutes <= intent.maxDriveMinutes + 15);
     const candidates = (withinDrive.length >= 8 ? withinDrive : routed).slice(0, 24);
     const weatherEnriched = forecastIsAvailable(String(payload.trip?.startDate || "")) ? await enrichWeather(candidates, String(payload.trip?.startDate || ""), String(payload.trip?.endDate || "")) : candidates;
@@ -50,17 +54,14 @@ export async function POST(request: NextRequest) {
       rainChance: camp.rainChance || null, gustKph: camp.gustKph || null, bookingUrl: camp.bookingUrl || null, source: camp.source,
       dataCompleteness: (camp.name && !/^Campground \d+$/i.test(camp.name) ? 1 : 0) + (camp.area !== "Korea" ? 1 : 0) + (camp.facilities[0] !== "Verify facilities" ? 1 : 0) + (camp.bookingUrl ? 1 : 0) + (camp.dogFriendly !== null ? 1 : 0),
     }));
+    const nearby = (await Promise.all(weatherEnriched.slice(0, 3).map((camp) => fetchNearbyPlaces(camp.id, camp.coordinates)))).flat();
     const rawPlan = await completeJson(client, [
       { role: "system", content: "You are CamperLife, an evidence-aware camping search ranker. Use only supplied live candidates, road metrics, weather, profile, map area, and trip facts. Never invent facts. Unknown pet policy is not proof of dog friendliness. Respond only in English." },
-      { role: "user", content: `Rank the factual candidates for this exact traveler and build a trip plan. Return strict JSON with summary, changes (2-5 strings), packing (3-8 strings), search (the supplied intent fields), rankedCampIds (candidate IDs only, best first), recommendations (top 12 objects: id, score 0-100, reason, tradeoff, quiet 0-100, wild 0-100), and itinerary (3-6 objects: time, title, detail). Make every explanation traceable to supplied facts and say what needs operator verification. Strongly prefer identifiable operator records with higher dataCompleteness; do not rank an anonymous, oddly named, or unverifiable record above a complete record merely because it is closer.\nSearch intent:${JSON.stringify(intent)}\nTraveler input:${JSON.stringify(payload)}\nLive candidate facts:${JSON.stringify(candidateFacts)}` },
+      { role: "user", content: `Rank the factual candidates and build the complete trip plan in one response. Return strict JSON with summary, changes (2-5 strings), packing (3-8 strings), search (the supplied intent fields), rankedCampIds (candidate IDs only, best first), recommendations (top 12 objects: id, score 0-100, reason, tradeoff, quiet 0-100, wild 0-100), itinerary (4-8 objects: time, title, detail), and routeStopIds (0-5 supplied place IDs in visit order). If selectedCampId is supplied and exists in the facts, rank it first unless a supplied hard fact makes it unsafe or impossible. Route stops must belong to the campground ranked first, avoid excessive detours, and normally include at most one restaurant. Make every explanation traceable to supplied facts and mark facts requiring operator verification. Prefer identifiable records with higher dataCompleteness.\nSearch intent:${JSON.stringify(intent)}\nTraveler input:${JSON.stringify(payload)}\nLive candidate facts:${JSON.stringify(candidateFacts)}\nLive nearby places:${JSON.stringify(nearby)}` },
     ]);
     const plan = validateSearchPlan(rawPlan, intent, new Set(weatherEnriched.map((camp) => camp.id)));
     const topCamp = plan.rankedCampIds?.length ? weatherEnriched.find((camp) => camp.id === plan.rankedCampIds![0]) : undefined;
-    const nearby = topCamp ? await fetchNearbyPlaces(topCamp.coordinates) : [];
-    const finalPlan = nearby.length && topCamp ? applyRoutePlan(plan, await completeJson(client, [
-      { role: "system", content: "You are CamperLife's route itinerary planner. Select only supplied real place IDs. Build a practical route from the departure through a few worthwhile attractions/restaurants and finally the chosen campground. Use the profile, dates, party, budget and preferences. Never invent places or facts. Respond only in English." },
-      { role: "user", content: `Return strict JSON with summary, packing (3-8 strings), itinerary (4-8 objects with time,title,detail), and routeStopIds (0-5 supplied place IDs in visit order). Avoid excessive detours and normally include at most one restaurant. User input:${JSON.stringify(payload)}\nChosen campground:${JSON.stringify(candidateFacts.find((camp) => camp.id === topCamp.id))}\nLive nearby places:${JSON.stringify(nearby)}` },
-    ]), nearby) : plan;
+    const finalPlan = topCamp ? applyRoutePlan(plan, rawPlan, nearby, topCamp.id) : plan;
     const recommendationMap = new Map(finalPlan.recommendations?.map((item) => [item.id, item]) || []);
     const rankMap = new Map(finalPlan.rankedCampIds?.map((id, index) => [id, index]) || []);
     const rankedCamps = weatherEnriched.map((camp) => {
@@ -90,9 +91,9 @@ export async function POST(request: NextRequest) {
   }
 }
 
-type NearbyPlace = { id: string; type: "attraction" | "restaurant"; name: string; area: string; coordinates: [number, number]; cuisine?: string; source: string };
+type NearbyPlace = { id: string; campId: string; type: "attraction" | "restaurant"; name: string; area: string; coordinates: [number, number]; cuisine?: string; source: string };
 
-async function fetchNearbyPlaces([longitude, latitude]: [number, number]): Promise<NearbyPlace[]> {
+async function fetchNearbyPlaces(campId: string, [longitude, latitude]: [number, number]): Promise<NearbyPlace[]> {
   const query = `[out:json][timeout:16];(nwr(around:18000,${latitude},${longitude})["tourism"~"attraction|museum|viewpoint|theme_park|zoo|gallery"]["name"];nwr(around:12000,${latitude},${longitude})["amenity"="restaurant"]["name"];);out tags center qt 70;`;
   try {
     const response = await fetch("https://overpass.kumi.systems/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" }, body: new URLSearchParams({ data: query }), signal: AbortSignal.timeout(9000) });
@@ -100,13 +101,13 @@ async function fetchNearbyPlaces([longitude, latitude]: [number, number]): Promi
     return (data.elements || []).flatMap((item) => {
       const lat = item.lat ?? item.center?.lat; const lon = item.lon ?? item.center?.lon; const tags = item.tags || {}; if (!Number.isFinite(lat) || !Number.isFinite(lon) || !tags.name) return [];
       const type = tags.amenity === "restaurant" ? "restaurant" as const : "attraction" as const;
-      return [{ id: `poi-${item.type[0]}-${item.id}`, type, name: tags.name, area: [tags["addr:city"], tags["addr:district"], tags["addr:full"]].filter(Boolean).join(", ") || "Near campground", coordinates: [lon!, lat!] as [number, number], cuisine: tags.cuisine, source: `OpenStreetMap ${item.type} ${item.id}` }];
+      return [{ id: `poi-${item.type[0]}-${item.id}`, campId, type, name: tags.name, area: [tags["addr:city"], tags["addr:district"], tags["addr:full"]].filter(Boolean).join(", ") || "Near campground", coordinates: [lon!, lat!] as [number, number], cuisine: tags.cuisine, source: `OpenStreetMap ${item.type} ${item.id}` }];
     }).slice(0, 50);
   } catch { return []; }
 }
 
-function applyRoutePlan(plan: Omit<PlanResponse, "source" | "model">, value: unknown, places: NearbyPlace[]): Omit<PlanResponse, "source" | "model"> {
-  if (!value || typeof value !== "object") return plan; const item = value as Record<string, unknown>; const placeMap = new Map(places.map((place) => [place.id, place]));
+function applyRoutePlan(plan: Omit<PlanResponse, "source" | "model">, value: unknown, places: NearbyPlace[], campId: string): Omit<PlanResponse, "source" | "model"> {
+  if (!value || typeof value !== "object") return plan; const item = value as Record<string, unknown>; const placeMap = new Map(places.filter((place) => place.campId === campId).map((place) => [place.id, place]));
   const ids = Array.isArray(item.routeStopIds) ? item.routeStopIds.filter((id): id is string => typeof id === "string" && placeMap.has(id)).slice(0, 5) : [];
   const routeStops: RouteStop[] = ids.map((id, index) => { const place = placeMap.get(id)!; return { id: place.id, type: place.type, name: place.name, area: place.area, coordinates: place.coordinates, reason: "Selected by CamperLife from live nearby place data", visitOrder: index + 1, source: place.source }; });
   const itinerary = Array.isArray(item.itinerary) ? item.itinerary.flatMap((entry) => { if (!entry || typeof entry !== "object") return []; const row = entry as Record<string, unknown>; return typeof row.time === "string" && typeof row.title === "string" && typeof row.detail === "string" ? [{ time: row.time.slice(0, 40), title: row.title.slice(0, 120), detail: row.detail.slice(0, 240) }] : []; }).slice(0, 8) : plan.itinerary;
