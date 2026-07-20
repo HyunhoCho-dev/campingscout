@@ -48,10 +48,11 @@ export async function POST(request: NextRequest) {
       driveMinutes: camp.driveMinutes || null, distanceKm: camp.distanceKm || null, price: camp.price || null,
       facilities: camp.facilities, dogFriendly: camp.dogFriendly, highC: camp.highC || null, lowC: camp.lowC || null,
       rainChance: camp.rainChance || null, gustKph: camp.gustKph || null, bookingUrl: camp.bookingUrl || null, source: camp.source,
+      dataCompleteness: (camp.name && !/^Campground \d+$/i.test(camp.name) ? 1 : 0) + (camp.area !== "Korea" ? 1 : 0) + (camp.facilities[0] !== "Verify facilities" ? 1 : 0) + (camp.bookingUrl ? 1 : 0) + (camp.dogFriendly !== null ? 1 : 0),
     }));
     const rawPlan = await completeJson(client, [
       { role: "system", content: "You are CampingScout, an evidence-aware camping search ranker and trip planner. Use only the supplied live candidates, road metrics, weather, profile, and trip facts. Never invent policies, prices, availability, facilities, weather, or routes. Unknown pet policy is not proof of dog friendliness. Respond in Korean when the request is Korean." },
-      { role: "user", content: `Rank the factual candidates for this exact traveler and build a trip plan. Return strict JSON with summary, changes (2-5 strings), packing (3-8 strings), search (the supplied intent fields), rankedCampIds (candidate IDs only, best first), recommendations (top 12 objects: id, score 0-100, reason, tradeoff, quiet 0-100, wild 0-100), and itinerary (3-6 objects: time, title, detail). Make every explanation traceable to supplied facts and say what needs operator verification.\nSearch intent:${JSON.stringify(intent)}\nTraveler input:${JSON.stringify(payload)}\nLive candidate facts:${JSON.stringify(candidateFacts)}` },
+      { role: "user", content: `Rank the factual candidates for this exact traveler and build a trip plan. Return strict JSON with summary, changes (2-5 strings), packing (3-8 strings), search (the supplied intent fields), rankedCampIds (candidate IDs only, best first), recommendations (top 12 objects: id, score 0-100, reason, tradeoff, quiet 0-100, wild 0-100), and itinerary (3-6 objects: time, title, detail). Make every explanation traceable to supplied facts and say what needs operator verification. Strongly prefer identifiable operator records with higher dataCompleteness; do not rank an anonymous, oddly named, or unverifiable record above a complete record merely because it is closer.\nSearch intent:${JSON.stringify(intent)}\nTraveler input:${JSON.stringify(payload)}\nLive candidate facts:${JSON.stringify(candidateFacts)}` },
     ]);
     const plan = validateSearchPlan(rawPlan, intent, new Set(weatherEnriched.map((camp) => camp.id)));
     const recommendationMap = new Map(plan.recommendations?.map((item) => [item.id, item]) || []);
@@ -75,7 +76,7 @@ export async function POST(request: NextRequest) {
       source: `${factual.source} + OSRM road matrix + live weather + DeepSeek ranking`,
       counts: { discovered: factual.camps.length, routed: routed.filter((camp) => camp.driveMinutes > 0).length, weather: weatherEnriched.filter((camp) => camp.lowC || camp.highC).length, ranked: plan.rankedCampIds?.length || 0 },
       live: true,
-    });
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const status = error instanceof OpenAI.APIError && [401, 402, 403, 429].includes(error.status) ? error.status : 502;
     const message = error instanceof Error ? error.message : "AI campground search failed";

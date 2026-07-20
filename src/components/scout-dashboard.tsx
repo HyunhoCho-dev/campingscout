@@ -94,7 +94,7 @@ export function ScoutDashboard() {
 
   useEffect(() => {
     const seedTrip = initialTrip.current; const [longitude, latitude] = seedTrip.origin;
-    fetch(`/api/campgrounds?latitude=${latitude}&longitude=${longitude}&radius=${Math.max(50000, seedTrip.maxDriveMinutes * 1300)}`)
+    fetch(`/api/campgrounds?latitude=${latitude}&longitude=${longitude}&radius=${Math.max(50000, seedTrip.maxDriveMinutes * 1300)}`, { cache: "no-store" })
       .then(async (response) => response.ok ? await response.json() as { camps: Campground[]; source: string; live: boolean } : Promise.reject())
       .then((result) => {
         if (!result.camps.length) { setDataSource(result.source || "Live campground data unavailable"); return; }

@@ -10,10 +10,10 @@ export async function GET(request: NextRequest) {
   const radius = clamp(Number(request.nextUrl.searchParams.get("radius")) || 120000, 1000, 200000);
 
   try {
-    return NextResponse.json(await searchCampgrounds(latitude, longitude, radius));
+    return NextResponse.json(await searchCampgrounds(latitude, longitude, radius), { headers: { "Cache-Control": "no-store, max-age=0" } });
   } catch (error) {
     console.error("OpenStreetMap campground lookup failed", error instanceof Error ? error.message : "unknown error");
-    return NextResponse.json({ camps: [], source: "Live campground providers unavailable", live: false, error: "Could not load factual campground data" }, { status: 503 });
+    return NextResponse.json({ camps: [], source: "Live campground providers unavailable", live: false, error: "Could not load factual campground data" }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
 }
 
