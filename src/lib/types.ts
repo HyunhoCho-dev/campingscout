@@ -54,5 +54,6 @@ export type PlanResponse = {
     requiredFacilities: string[];
   };
   rankedCampIds?: string[];
+  recommendations?: Array<{ id: string; score: number; reason: string; tradeoff: string; quiet: number; wild: number }>;
   itinerary?: Array<{ time: string; title: string; detail: string }>;
 };

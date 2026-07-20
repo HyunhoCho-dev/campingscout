@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { LineString, Polygon } from "geojson";
 import {
   AlertTriangle, Backpack, Bell, CalendarDays, Car, Check, ChevronDown, CloudSun,
@@ -57,6 +57,7 @@ export function ScoutDashboard() {
   const [aiManaged, setAiManaged] = useState(false);
   const [profile, setProfile] = useState<CamperProfile>(() => readStored("campingscout-profile", defaultProfile));
   const [trip, setTrip] = useState<TripSettings>(() => readStored("campingscout-trip", defaultTrip));
+  const initialTrip = useRef(trip);
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [navigation, setNavigation] = useState<NavigationData | null>(null);
   const [dataSource, setDataSource] = useState("Loading real campground data…");
@@ -92,15 +93,15 @@ export function ScoutDashboard() {
   }, []);
 
   useEffect(() => {
-    const [longitude, latitude] = trip.origin;
-    fetch(`/api/campgrounds?latitude=${latitude}&longitude=${longitude}&radius=${Math.max(50000, trip.maxDriveMinutes * 1300)}`)
+    const seedTrip = initialTrip.current; const [longitude, latitude] = seedTrip.origin;
+    fetch(`/api/campgrounds?latitude=${latitude}&longitude=${longitude}&radius=${Math.max(50000, seedTrip.maxDriveMinutes * 1300)}`)
       .then(async (response) => response.ok ? await response.json() as { camps: Campground[]; source: string; live: boolean } : Promise.reject())
       .then((result) => {
         if (!result.camps.length) { setDataSource(result.source || "Live campground data unavailable"); return; }
         setCamps(result.camps); setSelected(result.camps[0]); setPinned([result.camps[0].id]);
         setMapCardOpen(true); setDataSource(result.source);
       }).catch(() => setDataSource("Live data unavailable · current cards are placeholders"));
-  }, [trip.origin, trip.maxDriveMinutes]);
+  }, []);
 
   useEffect(() => {
     fetch("/api/navigation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ origin: trip.origin, destination: selected.coordinates, minutes: trip.maxDriveMinutes }) })
@@ -144,28 +145,30 @@ export function ScoutDashboard() {
     await runScout(command.trim());
   }
 
-  async function runScout(prompt: string) {
+  async function runScout(prompt: string, searchTrip = trip) {
     setThinking(true);
+    setDataSource("Scout is interpreting your profile and collecting live candidates…");
     try {
-      const response = await fetch("/api/plan", {
+      const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(openRouterKey ? { "X-OpenRouter-Key": openRouterKey } : {}) },
-        body: JSON.stringify({ command: prompt, selected, candidates: camps.slice(0, 30), preference, profile, trip, weather }),
+        body: JSON.stringify({ command: prompt, preference, profile, trip: searchTrip, user: session?.user ? { displayName: session.user.displayName } : null }),
       });
-      const result = await response.json() as PlanResponse & { error?: string };
+      const result = await response.json() as { camps?: Campground[]; plan?: PlanResponse; source?: string; counts?: { discovered: number; routed: number; weather: number; ranked: number }; error?: string };
       if (!response.ok || result.error) throw new Error(result.error || "AI planning failed");
-      setAiPlan(result);
-      if (result.search) {
-        setPreference({ quiet: result.search.quiet, wild: result.search.wild });
-        setTrip((value) => ({ ...value, maxDriveMinutes: result.search!.maxDriveMinutes, budget: result.search!.budget }));
-        setAiFilters({ dogFriendly: result.search.dogFriendly, requiredFacilities: result.search.requiredFacilities });
+      if (!result.plan || !result.camps?.length) throw new Error("Scout returned no ranked live campgrounds");
+      setCamps(result.camps); setAiPlan(result.plan); setAiFilters({ dogFriendly: false, requiredFacilities: [] });
+      if (result.plan.search) {
+        setPreference({ quiet: result.plan.search.quiet, wild: result.plan.search.wild });
+        setTrip({ ...searchTrip, maxDriveMinutes: result.plan.search.maxDriveMinutes, budget: result.plan.search.budget });
       }
-      if (result.rankedCampIds?.length) {
-        setAiRankedIds(result.rankedCampIds);
-        const best = result.rankedCampIds.map((id) => camps.find((camp) => camp.id === id)).find(Boolean);
+      if (result.plan.rankedCampIds?.length) {
+        setAiRankedIds(result.plan.rankedCampIds);
+        const best = result.plan.rankedCampIds.map((id) => result.camps!.find((camp) => camp.id === id)).find(Boolean);
         if (best) chooseCamp(best);
       }
-      setAiConnected(result.source === "deepseek-v4-flash");
+      setDataSource(`${result.source || "Live AI search"} · ${result.counts?.discovered || result.camps.length} found / ${result.counts?.ranked || result.camps.length} AI-ranked`);
+      setAiConnected(result.plan.source === "deepseek-v4-flash");
       setPlanOpen(true);
       setCommand("");
     } catch (error) {
@@ -174,6 +177,12 @@ export function ScoutDashboard() {
     } finally {
       setThinking(false);
     }
+  }
+
+  async function searchFromSettings(nextTrip: TripSettings) {
+    setSettingsOpen(false);
+    setTrip(nextTrip);
+    await runScout(`Search now using my saved profile and these trip settings. Rank real campgrounds for ${nextTrip.originName}, ${nextTrip.startDate} to ${nextTrip.endDate}, ${nextTrip.travelers} travelers, budget ${nextTrip.budget} KRW, and a maximum drive of ${nextTrip.maxDriveMinutes} minutes.`, nextTrip);
   }
 
   async function connectOpenRouter(key: string) {
@@ -246,18 +255,13 @@ export function ScoutDashboard() {
           </div>
 
           <div className="section-title"><span>Weekend itinerary</span><span className="live-dot">Draft</span></div>
-          <ol className="timeline">
-            <li><time>START<small>{trip.startDate.slice(5)}</small></time><span><strong>Depart {trip.originName}</strong><small>18:00 · After work</small></span></li>
-            <li><time>ARRIVE<small>{trip.startDate.slice(5)}</small></time><span><strong>Arrive & set up</strong><small>{formatDrive(navigation?.driveMinutes ?? selected.driveMinutes)} drive</small></span></li>
-            <li><time>DAY 2<small>EXPLORE</small></time><span><strong>Explore & reset</strong><small>Scout itinerary · All day</small></span></li>
-            <li><time>END<small>{trip.endDate.slice(5)}</small></time><span><strong>Pack up & return</strong><small>Leave by 10:00</small></span></li>
-          </ol>
+          <ol className="timeline">{aiPlan?.itinerary?.length ? aiPlan.itinerary.slice(0, 4).map((item, index) => <li key={`${item.time}-${index}`}><time>{item.time.slice(0, 8)}<small>AI PLAN</small></time><span><strong>{item.title}</strong><small>{item.detail}</small></span></li>) : <><li><time>START<small>{trip.startDate.slice(5)}</small></time><span><strong>Depart {trip.originName}</strong><small>Search to generate with Scout</small></span></li><li><time>ARRIVE<small>LIVE ROUTE</small></time><span><strong>Waiting for a ranked campground</strong><small>Road time appears after search</small></span></li></>}</ol>
           <button className="compare-button" onClick={() => setCompareOpen(true)}><SlidersHorizontal size={17} /> Compare top matches</button>
         </aside>
 
         <section className="map-stage">
           <CampMap camps={visibleCamps} selected={selected} onSelect={chooseCamp} route={navigation?.route} reach={navigation?.reach} origin={trip.origin} />
-          <div className="reach-legend"><span className="reach-swatch" /><span><strong>Driving time</strong><small>Up to {Math.round(trip.maxDriveMinutes / 60)} hours · {navigation?.live ? `live ${navigation.source}` : "temporary estimate"}</small></span></div>
+          <div className="reach-legend"><span className="reach-swatch" /><span><strong>Selected road route</strong><small>{navigation?.live ? `live ${navigation.source}` : "Calculating actual route…"}</small></span></div>
           <button className="locate-button" aria-label="Center on my location"><LocateFixed size={19} /></button>
           {mapCardOpen && <div className="selected-map-card">
             <div className="selected-map-photo" style={{ backgroundImage: `url(${selected.image})` }} />
@@ -302,7 +306,7 @@ export function ScoutDashboard() {
       {planOpen && <PlanDrawer selected={selected} aiPlan={aiPlan} weather={weather} saving={saving} onSave={saveAndShareTrip} onClose={() => setPlanOpen(false)} />}
       {compareOpen && <CompareModal camps={visibleCamps.slice(0, 3)} selected={selected} onSelect={(camp) => { chooseCamp(camp); setCompareOpen(false); }} onClose={() => setCompareOpen(false)} />}
       {profileOpen && <ProfileModal profile={profile} onSave={saveProfile} onClose={() => setProfileOpen(false)} />}
-      {settingsOpen && <TripSettingsModal settings={trip} onSave={(value) => { setTrip(value); setSettingsOpen(false); }} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <TripSettingsModal settings={trip} searching={thinking} onSave={searchFromSettings} onClose={() => setSettingsOpen(false)} />}
       {aiSettingsOpen && <OpenRouterModal initialKey={openRouterKey} connected={aiConnected} managed={aiManaged} onConnect={connectOpenRouter} onDisconnect={disconnectOpenRouter} onClose={() => setAiSettingsOpen(false)} />}
       {toast && <div className="toast"><Check size={16} /> {toast}</div>}
     </main>
@@ -337,10 +341,10 @@ function ProfileModal({ profile, onSave, onClose }: { profile: CamperProfile; on
   return <div className="overlay overlay--center"><section className="profile-modal" role="dialog" aria-modal="true" aria-label="Camper profile"><div className="drawer-head"><div><span className="eyebrow">Your camping profile</span><h2>Help Scout plan like you</h2></div><button className="icon-button" onClick={onClose} aria-label="Close profile"><X /></button></div><div className="profile-form"><label>Experience<select value={draft.experience} onChange={(e) => setDraft({ ...draft, experience: e.target.value })}><option>Beginner</option><option>Intermediate</option><option>Advanced</option></select></label><label>Travel party<input value={draft.party} onChange={(e) => setDraft({ ...draft, party: e.target.value })} /></label><label>Vehicle<select value={draft.vehicle} onChange={(e) => setDraft({ ...draft, vehicle: e.target.value })}><option>Sedan</option><option>SUV</option><option>RV</option><option>EV</option></select></label><label>Sleeping bag comfort<input type="number" value={draft.sleepingBagComfortC} onChange={(e) => setDraft({ ...draft, sleepingBagComfortC: Number(e.target.value) })} /><span>°C</span></label><fieldset><legend>Must-have facilities</legend>{["Toilet", "Drinking water", "Shower", "Power"].map((item) => <label key={item}><input type="checkbox" checked={draft.facilities.includes(item)} onChange={() => toggle(item)} /> {item}</label>)}</fieldset></div><button className="primary full" onClick={() => onSave(draft)}>Save profile <Check size={17} /></button></section></div>;
 }
 
-function TripSettingsModal({ settings, onSave, onClose }: { settings: TripSettings; onSave: (settings: TripSettings) => void; onClose: () => void }) {
+function TripSettingsModal({ settings, searching, onSave, onClose }: { settings: TripSettings; searching: boolean; onSave: (settings: TripSettings) => void | Promise<void>; onClose: () => void }) {
   const [draft, setDraft] = useState(settings);
   const origins: Record<string, [number, number]> = { Seoul: [126.978, 37.5665], Incheon: [126.7052, 37.4563], Daejeon: [127.3845, 36.3504], Busan: [129.0756, 35.1796] };
-  return <div className="overlay overlay--center"><section className="profile-modal" role="dialog" aria-modal="true" aria-label="Trip search settings"><div className="drawer-head"><div><span className="eyebrow">Search the right radius</span><h2>Trip details</h2></div><button className="icon-button" onClick={onClose} aria-label="Close trip settings"><X /></button></div><div className="profile-form"><label>Departure city<select value={draft.originName} onChange={(e) => setDraft({ ...draft, originName: e.target.value, origin: origins[e.target.value] })}>{Object.keys(origins).map((name) => <option key={name}>{name}</option>)}</select></label><label>Travelers<input min="1" max="12" type="number" value={draft.travelers} onChange={(e) => setDraft({ ...draft, travelers: Number(e.target.value) })} /></label><label>Start date<input type="date" value={draft.startDate} onChange={(e) => setDraft({ ...draft, startDate: e.target.value })} /></label><label>End date<input type="date" min={draft.startDate} value={draft.endDate} onChange={(e) => setDraft({ ...draft, endDate: e.target.value })} /></label><label>Budget (KRW)<input min="0" step="10000" type="number" value={draft.budget} onChange={(e) => setDraft({ ...draft, budget: Number(e.target.value) })} /></label><label>Maximum drive<select value={draft.maxDriveMinutes} onChange={(e) => setDraft({ ...draft, maxDriveMinutes: Number(e.target.value) })}><option value="60">1 hour</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option></select></label></div><button className="primary full" disabled={!draft.startDate || !draft.endDate || draft.endDate < draft.startDate} onClick={() => onSave(draft)}>Search this trip <Save size={17} /></button></section></div>;
+  return <div className="overlay overlay--center"><section className="profile-modal" role="dialog" aria-modal="true" aria-label="Trip search settings"><div className="drawer-head"><div><span className="eyebrow">AI-powered live search</span><h2>Trip details</h2></div><button className="icon-button" onClick={onClose} aria-label="Close trip settings"><X /></button></div><div className="profile-form"><label>Departure city<select value={draft.originName} onChange={(e) => setDraft({ ...draft, originName: e.target.value, origin: origins[e.target.value] })}>{Object.keys(origins).map((name) => <option key={name}>{name}</option>)}</select></label><label>Travelers<input min="1" max="12" type="number" value={draft.travelers} onChange={(e) => setDraft({ ...draft, travelers: Number(e.target.value) })} /></label><label>Start date<input type="date" value={draft.startDate} onChange={(e) => setDraft({ ...draft, startDate: e.target.value })} /></label><label>End date<input type="date" min={draft.startDate} value={draft.endDate} onChange={(e) => setDraft({ ...draft, endDate: e.target.value })} /></label><label>Budget (KRW)<input min="0" step="10000" type="number" value={draft.budget} onChange={(e) => setDraft({ ...draft, budget: Number(e.target.value) })} /></label><label>Maximum drive<select value={draft.maxDriveMinutes} onChange={(e) => setDraft({ ...draft, maxDriveMinutes: Number(e.target.value) })}><option value="60">1 hour</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option></select></label></div><button className="primary full" disabled={searching || !draft.startDate || !draft.endDate || draft.endDate < draft.startDate} onClick={() => onSave(draft)}>{searching ? "Scout is searching live data…" : "Search with Scout AI"} {searching ? <span className="spinner" /> : <Save size={17} />}</button></section></div>;
 }
 
 function OpenRouterModal({ initialKey, connected, managed, onConnect, onDisconnect, onClose }: { initialKey: string; connected: boolean; managed: boolean; onConnect: (key: string) => Promise<void>; onDisconnect: () => void; onClose: () => void }) {

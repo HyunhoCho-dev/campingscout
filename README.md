@@ -12,10 +12,10 @@ Camping search is fragmented across campground directories, weather pages, maps,
 
 ## Product capabilities
 
-- Live Korea Tourism Organization GoCamping search, with OpenStreetMap/Photon live fallback
+- Live Korea Tourism Organization GoCamping plus OpenStreetMap Overpass geographic search (up to 80 factual candidates)
 - Mapbox Directions and Isochrone routing, with live OSRM/OpenStreetMap road routing fallback
 - Open-Meteo weather, automatic MET Norway fallback, and sleeping-bag comfort warnings
-- DeepSeek V4 Flash through OpenRouter for structured search filters, candidate ranking, itinerary, and packing recommendations
+- One-click DeepSeek V4 Flash orchestration: profile interpretation → live candidate collection → road/weather enrichment → evidence-aware ranking → itinerary
 - Temporary in-app OpenRouter key connection stored only in browser session storage
 - Sign in with ChatGPT on OpenAI Sites
 - Cloudflare D1 profile and saved-trip persistence
@@ -28,7 +28,8 @@ Camping search is fragmented across campground directories, weather pages, maps,
 
 ```text
 Browser (Next/Vinext UI + MapLibre)
-  ├─ /api/campgrounds  → KTO GoCamping or OpenStreetMap/Photon
+  ├─ /api/campgrounds  → KTO GoCamping plus OpenStreetMap Overpass (Photon fallback)
+  ├─ /api/search       → DeepSeek intent → Overpass/GoCamping → OSRM matrix → weather → DeepSeek rank + plan
   ├─ /api/navigation   → Mapbox Directions/Isochrone or OSRM route
   ├─ /api/weather      → Open-Meteo or MET Norway
   ├─ /api/plan         → OpenRouter (DeepSeek V4 Flash)
@@ -94,10 +95,10 @@ This is a planning assistant, not an emergency, weather-warning, or reservation 
 ## Hackathon demo flow
 
 1. Edit departure city, dates, travelers, budget, and drive radius.
-2. Move the “Tune your wild” point and compare the ranked recommendations.
-3. Select a campground and inspect the route, source, weather, and gear warning.
-4. Ask Scout: “Make it quieter, dog-friendly, and safe for my 8°C sleeping bag.”
-5. Open the operator link, save the trip, and share the copied link.
+2. Press **Search with Scout AI**. Scout interprets the saved profile, collects live candidates, attaches actual road times and forecasts, ranks them, and redraws the map.
+3. Move the “Tune your wild” point or ask: “Make it quieter, dog-friendly, and safe for my 8°C sleeping bag” to rerun the full live pipeline.
+4. Select any ranked marker and inspect its actual route, source, weather, gear warning, and AI explanation.
+5. Open the operator link, save the generated trip, and share the copied link.
 
 ## License
 

@@ -9,26 +9,37 @@ export async function GET(request: NextRequest) {
   const longitude = clamp(Number(request.nextUrl.searchParams.get("longitude")) || 126.978, -180, 180);
   const radius = clamp(Number(request.nextUrl.searchParams.get("radius")) || 120000, 1000, 200000);
 
-  if (process.env.GOCAMPING_SERVICE_KEY) {
-    try {
-      const camps = await fetchGoCamping(latitude, longitude, radius, process.env.GOCAMPING_SERVICE_KEY);
-      if (camps.length) return NextResponse.json({ camps, source: "Korea Tourism Organization GoCamping · live public data", live: true });
-    } catch (error) { console.error("GoCamping lookup failed; trying OpenStreetMap", error instanceof Error ? error.message : "unknown error"); }
-  }
-
   try {
-    const camps = await fetchOpenStreetMap(latitude, longitude, Math.min(radius, 120000));
-    if (!camps.length) return NextResponse.json({ camps: [], source: "No real campgrounds found in this radius", live: true });
-    return NextResponse.json({ camps, source: "OpenStreetMap via Photon · live community data", live: true });
+    return NextResponse.json(await searchCampgrounds(latitude, longitude, radius));
   } catch (error) {
     console.error("OpenStreetMap campground lookup failed", error instanceof Error ? error.message : "unknown error");
     return NextResponse.json({ camps: [], source: "Live campground providers unavailable", live: false, error: "Could not load factual campground data" }, { status: 503 });
   }
 }
 
+export async function searchCampgrounds(latitude: number, longitude: number, radius: number) {
+  const jobs: Promise<{ camps: Campground[]; source: string }>[] = [
+    fetchOverpass(latitude, longitude, Math.min(radius, 200000)).then((camps) => ({ camps, source: "OpenStreetMap Overpass" })),
+  ];
+  if (process.env.GOCAMPING_SERVICE_KEY) jobs.push(fetchGoCamping(latitude, longitude, radius, process.env.GOCAMPING_SERVICE_KEY).then((camps) => ({ camps, source: "KTO GoCamping" })));
+  const settled = await Promise.allSettled(jobs);
+  const successful = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  if (!successful.length) {
+    const photon = await fetchPhoton(latitude, longitude, Math.min(radius, 120000));
+    return { camps: photon, source: "OpenStreetMap via Photon · live fallback", live: true };
+  }
+  const unique = new Map<string, Campground>();
+  successful.flatMap((result) => result.camps).forEach((camp) => {
+    const key = `${camp.name.toLowerCase()}-${camp.coordinates[0].toFixed(3)}-${camp.coordinates[1].toFixed(3)}`;
+    if (!unique.has(key)) unique.set(key, camp);
+  });
+  const camps = [...unique.values()].sort((a, b) => a.distanceKm - b.distanceKm).slice(0, 80);
+  return { camps, source: `${successful.map((item) => item.source).join(" + ")} · live factual records`, live: true };
+}
+
 async function fetchGoCamping(latitude: number, longitude: number, radius: number, serviceKey: string) {
   const url = new URL("https://apis.data.go.kr/B551011/GoCamping/locationBasedList");
-  Object.entries({ serviceKey, mapX: String(longitude), mapY: String(latitude), radius: String(radius), numOfRows: "40", pageNo: "1", MobileOS: "ETC", MobileApp: "CampingScout", _type: "json" }).forEach(([key, value]) => url.searchParams.set(key, value));
+  Object.entries({ serviceKey, mapX: String(longitude), mapY: String(latitude), radius: String(radius), numOfRows: "100", pageNo: "1", MobileOS: "ETC", MobileApp: "CampingScout", _type: "json" }).forEach(([key, value]) => url.searchParams.set(key, value));
   const response = await fetch(url, { signal: AbortSignal.timeout(12000) });
   if (!response.ok) throw new Error(`GoCamping returned ${response.status}`);
   const payload = await response.json() as { response?: { body?: { items?: { item?: Record<string, string> | Record<string, string>[] } } } };
@@ -36,7 +47,27 @@ async function fetchGoCamping(latitude: number, longitude: number, radius: numbe
   return (Array.isArray(raw) ? raw : raw ? [raw] : []).map(normalizeGoCamping).filter((camp): camp is Campground => Boolean(camp));
 }
 
-async function fetchOpenStreetMap(latitude: number, longitude: number, radius: number) {
+async function fetchOverpass(latitude: number, longitude: number, radius: number) {
+  const query = `[out:json][timeout:22];nwr(around:${Math.round(radius)},${latitude},${longitude})["tourism"="camp_site"];out tags center qt 120;`;
+  const endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
+  let lastError: unknown;
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CampingScout/1.0" },
+        body: new URLSearchParams({ data: query }),
+        signal: AbortSignal.timeout(26000),
+      });
+      if (!response.ok) throw new Error(`Overpass returned ${response.status}`);
+      const payload = await response.json() as { elements?: OverpassElement[] };
+      return (payload.elements || []).map((item, index) => normalizeOverpass(item, index, latitude, longitude)).filter((camp): camp is Campground => Boolean(camp));
+    } catch (error) { lastError = error; }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Overpass unavailable");
+}
+
+async function fetchPhoton(latitude: number, longitude: number, radius: number) {
   const terms = ["캠핑장", "야영장", "오토캠핑장"];
   const results = await Promise.all(terms.map(async (term) => {
     const url = new URL("https://photon.komoot.io/api/");
@@ -55,6 +86,32 @@ async function fetchOpenStreetMap(latitude: number, longitude: number, radius: n
 }
 
 type PhotonFeature = { geometry?: { coordinates?: [number, number] }; properties?: Record<string, string | number> };
+type OverpassElement = { type: "node" | "way" | "relation"; id: number; lat?: number; lon?: number; center?: { lat?: number; lon?: number }; tags?: Record<string, string> };
+
+function normalizeOverpass(item: OverpassElement, index: number, originLat: number, originLon: number): Campground | null {
+  const latitude = item.lat ?? item.center?.lat; const longitude = item.lon ?? item.center?.lon;
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  const tags = item.tags || {}; const distanceKm = haversine(originLat, originLon, latitude!, longitude!);
+  const facilities = [
+    yes(tags.toilets) && "Toilet", yes(tags.shower) && "Shower", yes(tags.drinking_water) && "Drinking water",
+    yes(tags.electricity) && "Power", yes(tags.internet_access) && "Internet", yes(tags.bbq) && "BBQ", yes(tags.fireplace) && "Fire pit",
+  ].filter((value): value is string => Boolean(value));
+  const dogTag = tags.dog ?? tags.dogs;
+  const area = [tags["addr:city"], tags["addr:county"], tags["addr:province"], tags["addr:full"]].filter(Boolean).join(", ") || "Korea";
+  const name = tags.name || tags["name:ko"] || tags["name:en"] || `Campground ${index + 1}`;
+  const sourceId = `${item.type}-${item.id}`;
+  return {
+    id: `osm-${item.type[0].toUpperCase()}-${item.id}`, name, area,
+    landscape: [tags.camp_site, tags.backcountry === "yes" ? "Backcountry" : "", tags.caravans === "yes" ? "Caravan" : ""].filter(Boolean).join(" · ") || "OpenStreetMap campground",
+    coordinates: [longitude!, latitude!], score: 70, driveMinutes: 0, distanceKm: Math.round(distanceKm), price: 0,
+    highC: 0, lowC: 0, rainChance: 0, gustKph: 0, facilities: facilities.length ? facilities : ["Verify facilities"],
+    dogFriendly: /^(yes|leashed|permissive)$/i.test(dogTag || "") ? true : /^(no|private)$/i.test(dogTag || "") ? false : null,
+    status: "verify", reason: "Live factual campground candidate awaiting AI ranking against this traveler and trip.",
+    tradeoff: "Unlisted price, availability, and policies must be verified with the operator.",
+    image: safeUrl(tags.image) || REPRESENTATIVE_IMAGE, source: `OpenStreetMap ${sourceId} via Overpass`, checkedAt: new Date().toISOString(), quiet: 50, wild: 50,
+    bookingUrl: safeUrl(tags.reservation || tags.website || tags["contact:website"]),
+  };
+}
 
 function normalizePhoton(item: PhotonFeature, index: number, originLat: number, originLon: number): Campground | null {
   const coordinates = item.geometry?.coordinates; const latitude = coordinates?.[1]; const longitude = coordinates?.[0];
@@ -89,5 +146,6 @@ function normalizeGoCamping(item: Record<string, string>, index: number): Campgr
 }
 
 function safeUrl(value?: string) { if (!value) return undefined; try { const url = new URL(value); return /https?:/.test(url.protocol) ? url.toString() : undefined; } catch { return undefined; } }
+function yes(value?: string) { return /^(yes|designated|customers|permissive)$/i.test(value || ""); }
 function clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(max, value)); }
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number) { const toRad = (value: number) => value * Math.PI / 180; const dLat = toRad(lat2 - lat1); const dLon = toRad(lon2 - lon1); const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2; return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)); }
