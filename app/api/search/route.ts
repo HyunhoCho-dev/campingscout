@@ -105,13 +105,24 @@ async function fetchNearbyPlaces(campId: string, [longitude, latitude]: [number,
   const query = `[out:json][timeout:16];(nwr(around:18000,${latitude},${longitude})["tourism"~"attraction|museum|viewpoint|theme_park|zoo|gallery"]["name"];nwr(around:12000,${latitude},${longitude})["amenity"="restaurant"]["name"];);out tags center qt 70;`;
   try {
     const response = await fetch("https://overpass.kumi.systems/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" }, body: new URLSearchParams({ data: query }), signal: AbortSignal.timeout(7000) });
-    if (!response.ok) return []; const data = await response.json() as { elements?: Array<{ type: string; id: number; lat?: number; lon?: number; center?: { lat?: number; lon?: number }; tags?: Record<string, string> }> };
+    if (!response.ok) throw new Error("Nearby place lookup failed"); const data = await response.json() as { elements?: Array<{ type: string; id: number; lat?: number; lon?: number; center?: { lat?: number; lon?: number }; tags?: Record<string, string> }> };
     return (data.elements || []).flatMap((item) => {
       const lat = item.lat ?? item.center?.lat; const lon = item.lon ?? item.center?.lon; const tags = item.tags || {}; if (!Number.isFinite(lat) || !Number.isFinite(lon) || !tags.name) return [];
       const type = tags.amenity === "restaurant" ? "restaurant" as const : "attraction" as const;
       return [{ id: `poi-${item.type[0]}-${item.id}`, campId, type, name: tags.name, area: [tags["addr:city"], tags["addr:district"], tags["addr:full"]].filter(Boolean).join(", ") || "Near campground", coordinates: [lon!, lat!] as [number, number], cuisine: tags.cuisine, source: `OpenStreetMap ${item.type} ${item.id}` }];
     }).slice(0, 50);
-  } catch { return []; }
+  } catch { return fetchNearbyPhoton(campId, longitude, latitude); }
+}
+
+async function fetchNearbyPhoton(campId: string, longitude: number, latitude: number): Promise<NearbyPlace[]> {
+  const queries: Array<{ query: string; type: "attraction" | "restaurant" }> = [{ query: "tourist attraction", type: "attraction" }, { query: "restaurant", type: "restaurant" }];
+  const settled = await Promise.allSettled(queries.map(async ({ query, type }) => {
+    const url = new URL("https://photon.komoot.io/api/"); url.searchParams.set("q", query); url.searchParams.set("lat", String(latitude)); url.searchParams.set("lon", String(longitude)); url.searchParams.set("limit", "20");
+    const response = await fetch(url, { headers: { "User-Agent": "CamperLife/1.0" }, signal: AbortSignal.timeout(6000) }); if (!response.ok) return [];
+    const data = await response.json() as { features?: Array<{ geometry?: { coordinates?: [number, number] }; properties?: Record<string, string | number> }> };
+    return (data.features || []).flatMap((feature) => { const coordinates = feature.geometry?.coordinates; const props = feature.properties || {}; if (!coordinates || String(props.countrycode || "").toUpperCase() !== "KR" || !props.name || haversine(latitude, longitude, coordinates[1], coordinates[0]) > 22) return []; return [{ id: `poi-photon-${props.osm_type || "p"}-${props.osm_id || `${coordinates[0]}-${coordinates[1]}`}`, campId, type, name: String(props.name), area: [props.city, props.county, props.state].filter(Boolean).join(", ") || "Near campground", coordinates, source: `OpenStreetMap ${props.osm_type || "place"} ${props.osm_id || "record"} via Photon` } satisfies NearbyPlace]; });
+  }));
+  const unique = new Map<string, NearbyPlace>(); settled.forEach((result) => { if (result.status === "fulfilled") result.value.forEach((place) => unique.set(place.id, place)); }); return [...unique.values()].slice(0, 30);
 }
 
 function applyRoutePlan(plan: Omit<PlanResponse, "source" | "model">, value: unknown, places: NearbyPlace[], campId: string): Omit<PlanResponse, "source" | "model"> {
@@ -205,3 +216,4 @@ function geographicallyDiverse(camps: Campground[], limit: number) {
   while (result.length < limit && groups.some((group) => index < group.length)) { for (const group of groups) if (group[index] && result.length < limit) result.push(group[index]); index += 1; }
   return result;
 }
+function haversine(lat1: number, lon1: number, lat2: number, lon2: number) { const toRad = (value: number) => value * Math.PI / 180; const dLat = toRad(lat2 - lat1); const dLon = toRad(lon2 - lon1); const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2; return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)); }
