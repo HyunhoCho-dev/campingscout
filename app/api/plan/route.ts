@@ -12,23 +12,44 @@ export async function POST(request: NextRequest) {
   if (payload.command.length > 1000) return NextResponse.json({ error: "Planning request is too long" }, { status: 413 });
 
   const apiKey = temporaryKey(request) || process.env.OPENROUTER_API_KEY;
-  if (!apiKey) return NextResponse.json(demoPlan(payload.command));
+  if (!apiKey) return NextResponse.json({ error: "OpenRouter is not configured. Add a deployment secret or a temporary browser key." }, { status: 503 });
 
   try {
     const client = openRouter(apiKey);
-    const completion = await client.chat.completions.create({
+    const userPrompt = `Act as both a search controller and trip planner. Return one JSON object with exactly these keys: summary (string), changes (array of 2-5 strings), packing (array of 3-8 strings), search (object with quiet 0-100, wild 0-100, maxDriveMinutes 15-240, budget nonnegative integer KRW, dogFriendly boolean, requiredFacilities string array), rankedCampIds (array containing only candidate IDs, best first), itinerary (array of 3-6 objects with time, title, detail strings). Infer filter changes from the user's command, preserve existing values when not requested, and rank only from supplied candidates. Trip facts:\n${JSON.stringify(payload)}`;
+    let completion = await client.chat.completions.create({
       model: MODEL,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: `Act as both a search controller and trip planner. Return one JSON object with exactly these keys: summary (string), changes (array of 2-5 strings), packing (array of 3-8 strings), search (object with quiet 0-100, wild 0-100, maxDriveMinutes 15-240, budget nonnegative integer KRW, dogFriendly boolean, requiredFacilities string array), rankedCampIds (array containing only candidate IDs, best first), itinerary (array of 3-6 objects with time, title, detail strings). Infer filter changes from the user's command, preserve existing values when not requested, and rank only from supplied candidates. Trip facts:\n${JSON.stringify(payload)}` },
+        { role: "user", content: userPrompt },
       ],
       response_format: { type: "json_object" },
       temperature: 0.25,
       max_tokens: 1800,
     });
-    const content = completion.choices[0]?.message?.content;
+    let content = completion.choices[0]?.message?.content;
     if (!content) throw new Error("The model returned an empty response");
-    const parsed = validatePlan(parseJson(content));
+    let rawPlan: unknown;
+    try {
+      rawPlan = parseJson(content);
+    } catch {
+      completion = await client.chat.completions.create({
+        model: MODEL,
+        messages: [
+          { role: "system", content: `${SYSTEM_PROMPT} Output strict JSON only: no markdown, commentary, or reasoning.` },
+          { role: "user", content: userPrompt },
+          { role: "assistant", content },
+          { role: "user", content: "The previous answer was not valid JSON. Return the same plan again as one complete, strict JSON object only." },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0,
+        max_tokens: 2200,
+      });
+      content = completion.choices[0]?.message?.content;
+      if (!content) throw new Error("The model returned an empty repair response");
+      rawPlan = parseJson(content);
+    }
+    const parsed = validatePlan(rawPlan);
     return NextResponse.json({ ...parsed, source: "deepseek-v4-flash", model: completion.model || MODEL } satisfies PlanResponse);
   } catch (error) {
     const status = error instanceof OpenAI.APIError && [401, 402, 403, 429].includes(error.status) ? error.status : 502;
@@ -93,13 +114,4 @@ function safeProviderMessage(status: number, message: string) {
   if (status === 403) return "OpenRouter blocked this request or the key lacks permission.";
   if (status === 429) return "OpenRouter is rate limiting requests. Please try again shortly.";
   return message.slice(0, 240) || "OpenRouter is temporarily unavailable.";
-}
-
-function demoPlan(command: string): PlanResponse {
-  return {
-    source: "demo",
-    summary: `Scout interpreted “${command.slice(0, 90)}” in offline preview mode. Connect an OpenRouter key to use DeepSeek V4 Flash.`,
-    changes: ["Kept camps matching the stated facilities", "Preserved the selected drive-time constraint", "Flagged gear and weather facts for verification"],
-    packing: ["Weather-appropriate sleeping system", "Rain shell", "Headlamp", "Offline map", "Water for the full party"],
-  };
 }
