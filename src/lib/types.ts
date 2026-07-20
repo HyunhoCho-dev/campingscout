@@ -41,12 +41,25 @@ export type Preference = { wild: number; quiet: number };
 
 export type RouteStop = {
   id: string;
-  type: "attraction" | "restaurant";
+  type: "attraction" | "restaurant" | "must-visit";
   name: string;
   area: string;
   coordinates: [number, number];
   reason: string;
   visitOrder: number;
+  source: string;
+  image?: string;
+  website?: string;
+  phone?: string;
+  openingHours?: string;
+  cuisine?: string;
+};
+
+export type MapPlace = {
+  id: string;
+  name: string;
+  area: string;
+  coordinates: [number, number];
   source: string;
 };
 
@@ -65,7 +78,14 @@ export type PlanResponse = {
     requiredFacilities: string[];
   };
   rankedCampIds?: string[];
-  recommendations?: Array<{ id: string; score: number; reason: string; tradeoff: string; quiet: number; wild: number }>;
+  recommendations?: Array<{
+    id: string;
+    score: number;
+    reason: string;
+    tradeoff: string;
+    quiet: number;
+    wild: number;
+  }>;
   routeStops?: RouteStop[];
   itinerary?: Array<{ time: string; title: string; detail: string }>;
 };
