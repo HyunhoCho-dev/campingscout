@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
   const shareToken = crypto.randomUUID().replaceAll("-", "").slice(0, 20);
-  const record = { id, userEmail: user.email, shareToken, title: String(body.title || "CampingScout trip").slice(0, 120), data: JSON.stringify(body.data), createdAt: now, updatedAt: now };
+  const record = { id, userEmail: user.email, shareToken, title: String(body.title || "CamperLife trip").slice(0, 120), data: JSON.stringify(body.data), createdAt: now, updatedAt: now };
   await ensureSchema();
   await getDb().insert(trips).values(record);
   return NextResponse.json({ trip: { ...record, data: body.data }, shareUrl: `/share/${shareToken}` }, { status: 201 });

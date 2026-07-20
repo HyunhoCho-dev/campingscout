@@ -4,7 +4,7 @@ import type { PlanResponse } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 const MODEL = process.env.OPENROUTER_MODEL || "deepseek/deepseek-v4-flash";
-const SYSTEM_PROMPT = "You are CampingScout, a cautious camping trip planning engine. Use only supplied facts. Never invent campground policies, availability, weather, prices, routes, or safety claims. Distinguish preference from hard constraints. Return concise Korean text when the user's command is Korean, otherwise use the user's language. Always remind the user to verify official alerts and operator policies.";
+const SYSTEM_PROMPT = "You are CamperLife, a cautious camping trip planning engine. Use only supplied facts. Never invent campground policies, availability, weather, prices, routes, or safety claims. Distinguish preference from hard constraints. Return concise Korean text when the user's command is Korean, otherwise use the user's language. Always remind the user to verify official alerts and operator policies.";
 
 export async function POST(request: NextRequest) {
   const payload = await request.json() as Record<string, unknown> & { command?: unknown };
@@ -64,7 +64,7 @@ export function openRouter(apiKey: string) {
     baseURL: "https://openrouter.ai/api/v1",
     defaultHeaders: {
       "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "https://campingscout-wild.hyunhocho123.chatgpt.site",
-      "X-OpenRouter-Title": "CampingScout",
+      "X-OpenRouter-Title": "CamperLife",
     },
   });
 }

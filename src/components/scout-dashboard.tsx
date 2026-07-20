@@ -4,8 +4,8 @@ import dynamic from "next/dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { LineString, Polygon } from "geojson";
 import {
-  AlertTriangle, Backpack, Bell, CalendarDays, Car, Check, ChevronDown, CloudSun,
-  Compass, Heart, Info, LocateFixed, MapPin, Navigation,
+  AlertTriangle, Backpack, CalendarDays, Car, Check, ChevronDown, CloudSun,
+  Compass, Globe2, Heart, Info, LocateFixed, MapPin, Navigation, Pencil, Search,
   ExternalLink, KeyRound, LogIn, LogOut, PawPrint, Route, Save, Share2, ShieldCheck, ShowerHead,
   SlidersHorizontal, Sparkles, TentTree, Thermometer, Users, WalletCards, X,
 } from "lucide-react";
@@ -18,14 +18,14 @@ const money = new Intl.NumberFormat("ko-KR");
 const formatDrive = (minutes: number) => `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 
 type CamperProfile = { experience: string; party: string; vehicle: string; sleepingBagComfortC: number; facilities: string[] };
-type TripSettings = { originName: string; origin: [number, number]; startDate: string; endDate: string; travelers: number; budget: number; maxDriveMinutes: number };
+type TripSettings = { originName: string; origin: [number, number]; startDate: string; endDate: string; travelers: number; budget: number; maxDriveMinutes: number; scope: "nationwide" | "drive" | "drawn" };
 type SessionInfo = { user: { displayName: string; email: string } | null; signInUrl: string; signOutUrl: string };
 type NavigationData = { route: LineString; reach: Polygon | null; driveMinutes: number | null; distanceKm: number | null; source: string; live: boolean };
 type AiFilters = { dogFriendly: boolean; requiredFacilities: string[] };
 
 const defaultProfile: CamperProfile = { experience: "Beginner", party: "2 adults · 1 child · 1 dog", vehicle: "Sedan", sleepingBagComfortC: 8, facilities: ["Toilet", "Drinking water"] };
 const upcomingWeekend = getUpcomingWeekend();
-const defaultTrip: TripSettings = { originName: "Seoul", origin: [126.978, 37.5665], startDate: upcomingWeekend.start, endDate: upcomingWeekend.end, travelers: 3, budget: 200000, maxDriveMinutes: 120 };
+const defaultTrip: TripSettings = { originName: "Seoul", origin: [126.978, 37.5665], startDate: upcomingWeekend.start, endDate: upcomingWeekend.end, travelers: 3, budget: 200000, maxDriveMinutes: 120, scope: "nationwide" };
 
 function readStored<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -56,7 +56,10 @@ export function ScoutDashboard() {
   const [aiConnected, setAiConnected] = useState(false);
   const [aiManaged, setAiManaged] = useState(false);
   const [profile, setProfile] = useState<CamperProfile>(() => readStored("campingscout-profile", defaultProfile));
-  const [trip, setTrip] = useState<TripSettings>(() => readStored("campingscout-trip", defaultTrip));
+  const [trip, setTrip] = useState<TripSettings>(() => ({ ...defaultTrip, ...readStored("campingscout-trip", defaultTrip) }));
+  const [language, setLanguage] = useState<"ko" | "en">(() => readStored("camperlife-language", "ko"));
+  const [searchArea, setSearchArea] = useState<[number, number][] | null>(() => readStored("camperlife-search-area", null));
+  const [drawMode, setDrawMode] = useState(false);
   const initialTrip = useRef(trip);
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [navigation, setNavigation] = useState<NavigationData | null>(null);
@@ -94,7 +97,7 @@ export function ScoutDashboard() {
 
   useEffect(() => {
     const seedTrip = initialTrip.current; const [longitude, latitude] = seedTrip.origin;
-    fetch(`/api/campgrounds?latitude=${latitude}&longitude=${longitude}&radius=${Math.max(50000, seedTrip.maxDriveMinutes * 1300)}`, { cache: "no-store" })
+    fetch(`/api/campgrounds?latitude=${latitude}&longitude=${longitude}&radius=${Math.max(50000, seedTrip.maxDriveMinutes * 1300)}&nationwide=${seedTrip.scope === "nationwide"}`, { cache: "no-store" })
       .then(async (response) => response.ok ? await response.json() as { camps: Campground[]; source: string; live: boolean } : Promise.reject())
       .then((result) => {
         if (!result.camps.length) { setDataSource(result.source || "Live campground data unavailable"); return; }
@@ -104,10 +107,10 @@ export function ScoutDashboard() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/navigation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ origin: trip.origin, destination: selected.coordinates, minutes: trip.maxDriveMinutes }) })
+    fetch("/api/navigation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ origin: trip.origin, destination: selected.coordinates, waypoints: aiPlan?.routeStops?.slice(0, 5).map((stop) => stop.coordinates) || [], minutes: trip.maxDriveMinutes }) })
       .then(async (response) => response.ok ? await response.json() as NavigationData : Promise.reject())
       .then((result) => setNavigation(result)).catch(() => setNavigation(null));
-  }, [selected, trip.origin, trip.maxDriveMinutes]);
+  }, [selected, trip.origin, trip.maxDriveMinutes, aiPlan?.routeStops]);
 
   useEffect(() => {
     let active = true;
@@ -127,6 +130,8 @@ export function ScoutDashboard() {
   useEffect(() => { window.localStorage.setItem("campingscout-preference", JSON.stringify(preference)); }, [preference]);
   useEffect(() => { window.localStorage.setItem("campingscout-profile", JSON.stringify(profile)); }, [profile]);
   useEffect(() => { window.localStorage.setItem("campingscout-trip", JSON.stringify(trip)); }, [trip]);
+  useEffect(() => { window.localStorage.setItem("camperlife-language", JSON.stringify(language)); }, [language]);
+  useEffect(() => { window.localStorage.setItem("camperlife-search-area", JSON.stringify(searchArea)); }, [searchArea]);
 
   const lowC = weather?.lowC ?? selected.lowC;
   const gearMismatch = lowC !== 0 && lowC < profile.sleepingBagComfortC;
@@ -152,9 +157,9 @@ export function ScoutDashboard() {
       const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(openRouterKey ? { "X-OpenRouter-Key": openRouterKey } : {}) },
-        body: JSON.stringify({ command: prompt, preference, profile, trip: searchTrip, user: session?.user ? { displayName: session.user.displayName } : null }),
+        body: JSON.stringify({ command: prompt, preference, profile, trip: searchTrip, language, searchArea: searchTrip.scope === "drawn" ? searchArea : null, user: session?.user ? { displayName: session.user.displayName } : null }),
       });
-      const result = await response.json() as { camps?: Campground[]; plan?: PlanResponse; source?: string; counts?: { discovered: number; routed: number; weather: number; ranked: number }; error?: string };
+      const result = await response.json() as { camps?: Campground[]; plan?: PlanResponse; source?: string; counts?: { discovered: number; routed: number; weather: number; ranked: number; places?: number }; error?: string };
       if (!response.ok || result.error) throw new Error(result.error || "AI planning failed");
       if (!result.plan || !result.camps?.length) throw new Error("Scout returned no ranked live campgrounds");
       setCamps(result.camps); setAiPlan(result.plan); setAiFilters({ dogFriendly: false, requiredFacilities: [] });
@@ -183,6 +188,11 @@ export function ScoutDashboard() {
     setSettingsOpen(false);
     setTrip(nextTrip);
     await runScout(`Search now using my saved profile and these trip settings. Rank real campgrounds for ${nextTrip.originName}, ${nextTrip.startDate} to ${nextTrip.endDate}, ${nextTrip.travelers} travelers, budget ${nextTrip.budget} KRW, and a maximum drive of ${nextTrip.maxDriveMinutes} minutes.`, nextTrip);
+  }
+
+  function acceptSearchArea(area: [number, number][]) {
+    setSearchArea(area); setTrip((value) => ({ ...value, scope: "drawn" })); setDrawMode(false);
+    setToast(language === "ko" ? "검색 영역이 저장됐습니다. 검색 버튼을 눌러 AI 추천을 갱신하세요." : "Area saved. Press Search to refresh AI recommendations.");
   }
 
   async function connectOpenRouter(key: string) {
@@ -227,7 +237,7 @@ export function ScoutDashboard() {
       <header className="topbar">
         <button className="brand" aria-label="CampingScout home">
           <span className="brand-mark"><TentTree size={24} /></span>
-          <span><strong>CampingScout</strong><small>Find your kind of wild.</small></span>
+          <span><strong>CamperLife</strong><small>Find your kind of wild.</small></span>
         </button>
         <div className="trip-bar" aria-label="Trip filters">
           <button onClick={() => setSettingsOpen(true)}><MapPin size={18} /><span>{trip.originName}</span><ChevronDown size={15} /></button>
@@ -235,7 +245,7 @@ export function ScoutDashboard() {
           <button onClick={() => setSettingsOpen(true)}><Users size={18} /><span>{trip.travelers} travelers</span><ChevronDown size={15} /></button>
           <button onClick={() => setSettingsOpen(true)}><WalletCards size={18} /><span>₩{money.format(trip.budget)}</span><ChevronDown size={15} /></button>
         </div>
-        <div className="top-actions"><button className={aiConnected ? "ai-key ai-key--connected" : "ai-key"} onClick={() => setAiSettingsOpen(true)} aria-label="Configure OpenRouter AI"><KeyRound size={19} /><i /></button><button aria-label="Notifications"><Bell size={19} /></button>{session?.user ? <><button className="avatar" onClick={() => setProfileOpen(true)} aria-label="Open profile">{session.user.displayName.slice(0, 2).toUpperCase()}</button><a href={session.signOutUrl} aria-label="Sign out"><LogOut size={18} /></a></> : <a href={session?.signInUrl || "/signin-with-chatgpt"} className="sign-in" aria-label="Sign in with ChatGPT"><LogIn size={18} /></a>}</div>
+        <div className="top-actions"><label className="language-control" aria-label="Language"><Globe2 size={17} /><select value={language} onChange={(event) => setLanguage(event.target.value as "ko" | "en")}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="top-search" disabled={thinking} onClick={() => runScout(language === "ko" ? "현재 선택된 출발지, 날짜, 인원, 예산, 프로필, 선호도와 지도 검색 영역을 모두 반영해 다시 검색하고 여행 경로를 생성해줘." : "Search again using every current origin, date, party, budget, profile, preference and drawn-area selection, then rebuild the route.")} aria-label="Search again with current conditions">{thinking ? <span className="spinner" /> : <Search size={19} />}</button><button className={aiConnected ? "ai-key ai-key--connected" : "ai-key"} onClick={() => setAiSettingsOpen(true)} aria-label="Configure OpenRouter AI"><KeyRound size={19} /><i /></button>{session?.user ? <><button className="avatar" onClick={() => setProfileOpen(true)} aria-label="Open profile">{session.user.displayName.slice(0, 2).toUpperCase()}</button><a href={session.signOutUrl} aria-label="Sign out"><LogOut size={18} /></a></> : <a href={session?.signInUrl || "/signin-with-chatgpt"} className="sign-in" aria-label="Sign in with ChatGPT"><LogIn size={18} /></a>}</div>
       </header>
 
       <section className="workspace">
@@ -260,11 +270,12 @@ export function ScoutDashboard() {
         </aside>
 
         <section className="map-stage">
-          <CampMap camps={visibleCamps} selected={selected} onSelect={chooseCamp} route={navigation?.route} reach={navigation?.reach} origin={trip.origin} />
+          <CampMap camps={visibleCamps} selected={selected} onSelect={chooseCamp} route={navigation?.route} reach={navigation?.reach} origin={trip.origin} stops={aiPlan?.routeStops} drawMode={drawMode} searchArea={searchArea} onAreaChange={acceptSearchArea} />
           <div className="reach-legend"><span className="reach-swatch" /><span><strong>Selected road route</strong><small>{navigation?.live ? `live ${navigation.source}` : "Calculating actual route…"}</small></span></div>
           <button className="locate-button" aria-label="Center on my location"><LocateFixed size={19} /></button>
+          <button className={drawMode ? "draw-area-button draw-area-button--active" : "draw-area-button"} onClick={() => setDrawMode((value) => !value)} aria-pressed={drawMode}><Pencil size={17} />{drawMode ? (language === "ko" ? "지도에서 3곳 이상 클릭 · 더블클릭으로 완료" : "Click 3+ points · double-click to finish") : (language === "ko" ? "지도 영역 지정" : "Draw search area")}</button>
           {mapCardOpen && <div className="selected-map-card">
-            <div className="selected-map-photo" style={{ backgroundImage: `url(${selected.image})` }} />
+            <div className={selected.image ? "selected-map-photo" : "selected-map-photo photo-missing"} style={selected.image ? { backgroundImage: `url(${selected.image})` } : undefined}>{!selected.image && <TentTree size={28} />}</div>
             <div><span className="tag">{labelForStatus(selected.status)}</span><strong>{selected.name}</strong><small>{selected.landscape}</small><div className="score-line"><b>{selected.score}</b><span>Suitability score</span></div></div>
             <button onClick={() => setMapCardOpen(false)} aria-label={`Close ${selected.name} preview`}><X size={16} /></button>
           </div>}
@@ -277,7 +288,8 @@ export function ScoutDashboard() {
         </section>
 
         <aside className="right-panel">
-          <div className="camp-photo" style={{ backgroundImage: `linear-gradient(180deg, transparent 58%, rgba(0,0,0,.36)), url(${selected.image})` }}>
+          <div className={selected.image ? "camp-photo" : "camp-photo photo-missing"} style={selected.image ? { backgroundImage: `linear-gradient(180deg, transparent 58%, rgba(0,0,0,.36)), url(${selected.image})` } : undefined}>
+            {!selected.image && <div className="photo-placeholder"><TentTree size={34} /><span>Verified campground photo unavailable</span></div>}
             <div className="photo-actions"><button aria-label="Save campground" onClick={() => setPinned((ids) => ids.includes(selected.id) ? ids.filter((id) => id !== selected.id) : [...ids, selected.id])}><Heart size={18} fill={pinned.includes(selected.id) ? "currentColor" : "none"} /></button></div>
             <span className="photo-caption">{dataSource}</span>
           </div>
@@ -328,11 +340,11 @@ function labelForStatus(status: Campground["status"]) { return ({ best: "Best Ma
 function PlanDrawer({ selected, aiPlan, weather, saving, onSave, onClose }: { selected: Campground; aiPlan: PlanResponse | null; weather: WeatherSnapshot | null; saving: boolean; onSave: () => void; onClose: () => void }) {
   const packing = aiPlan?.packing ?? ["Warmer sleeping bag or liner", "Waterproof shell", "Dog lead and bowl", "Headlamp", "Offline map", "2L water per traveler"];
   const itinerary = aiPlan?.itinerary?.length ? aiPlan.itinerary : [{ time: "FRI · 18:00", title: "Leave origin", detail: "Snacks and fuel before departure" }, { time: "ARRIVAL", title: "Arrive and set up", detail: "Pitch before sunset" }, { time: "DAY 2 · 09:00", title: "Explore nearby", detail: `Weather window: ${weather?.rainChance ?? selected.rainChance}% rain` }, { time: "FINAL · 10:00", title: "Pack and head home", detail: "Leave no trace check" }];
-  return <div className="overlay"><section className="drawer" role="dialog" aria-modal="true" aria-label="Trip plan"><div className="drawer-head"><div><span className="eyebrow">Ready to roam</span><h2>Your {selected.name} plan</h2></div><button className="icon-button" onClick={onClose} aria-label="Close plan"><X /></button></div>{aiPlan && <div className="ai-summary"><Sparkles size={18} /><div><strong>Scout update · {aiPlan.source === "deepseek-v4-flash" ? "DeepSeek V4 Flash · live" : "Offline preview"}</strong><p>{aiPlan.summary}</p></div></div>}<div className="plan-route">{itinerary.map((item, index) => <div key={`${item.time}-${index}`}><span>{item.time}</span><strong>{item.title}</strong><small>{item.detail}</small></div>)}</div><h3>Scout’s packing list</h3><div className="packing-grid">{packing.map((item) => <label key={item}><input type="checkbox" /><span>{item}</span></label>)}</div><div className="source-note"><ShieldCheck size={16} /><span>Weather is live when available. Always confirm alerts, availability, and operator policies before departure.</span></div><button className="primary full" onClick={onSave} disabled={saving}>{saving ? "Saving…" : "Save & copy share link"} <Share2 size={17} /></button></section></div>;
+  return <div className="overlay"><section className="drawer" role="dialog" aria-modal="true" aria-label="Trip plan"><div className="drawer-head"><div><span className="eyebrow">Ready to roam</span><h2>Your {selected.name} plan</h2></div><button className="icon-button" onClick={onClose} aria-label="Close plan"><X /></button></div>{aiPlan && <div className="ai-summary"><Sparkles size={18} /><div><strong>CamperLife AI · {aiPlan.source === "deepseek-v4-flash" ? "DeepSeek V4 Flash · live" : "Offline preview"}</strong><p>{aiPlan.summary}</p></div></div>}<div className="plan-route">{itinerary.map((item, index) => <div key={`${item.time}-${index}`}><span>{item.time}</span><strong>{item.title}</strong><small>{item.detail}</small></div>)}</div>{Boolean(aiPlan?.routeStops?.length) && <><h3>AI-selected places on your route</h3><div className="route-stops">{aiPlan!.routeStops!.map((stop) => <article key={stop.id}><span>{stop.type === "restaurant" ? "🍽" : "★"}</span><div><strong>{stop.visitOrder}. {stop.name}</strong><small>{stop.area} · {stop.reason}</small></div></article>)}</div></>}<h3>Scout’s packing list</h3><div className="packing-grid">{packing.map((item) => <label key={item}><input type="checkbox" /><span>{item}</span></label>)}</div><div className="source-note"><ShieldCheck size={16} /><span>Weather, campsites, restaurants and attractions come from live/public sources when available. Confirm hours, alerts and booking policies before departure.</span></div><button className="primary full" onClick={onSave} disabled={saving}>{saving ? "Saving…" : "Save & copy share link"} <Share2 size={17} /></button></section></div>;
 }
 
 function CompareModal({ camps, selected, onSelect, onClose }: { camps: Campground[]; selected: Campground; onSelect: (camp: Campground) => void; onClose: () => void }) {
-  return <div className="overlay overlay--center"><section className="compare-modal"><div className="drawer-head"><div><span className="eyebrow">Decision, simplified</span><h2>Three different kinds of right</h2></div><button className="icon-button" onClick={onClose}><X /></button></div><div className="compare-grid">{camps.map((camp) => <article key={camp.id} className={camp.id === selected.id ? "compare-card compare-card--selected" : "compare-card"}><span className="tag">{labelForStatus(camp.status)}</span><div className="compare-photo" style={{ backgroundImage: `url(${camp.image})` }} /><h3>{camp.name}</h3><p>{camp.reason}</p><dl><div><dt>Match</dt><dd>{camp.score}</dd></div><div><dt>Drive</dt><dd>{formatDrive(camp.driveMinutes)}</dd></div><div><dt>Low</dt><dd>{camp.lowC ? `${camp.lowC}°C` : "Live fetch"}</dd></div><div><dt>Cost</dt><dd>{camp.price ? `₩${money.format(camp.price)}` : "Verify"}</dd></div></dl><small className="tradeoff"><AlertTriangle size={14} /> {camp.tradeoff}</small><button onClick={() => onSelect(camp)}>{camp.id === selected.id ? "Selected" : "Choose this camp"}</button></article>)}</div></section></div>;
+  return <div className="overlay overlay--center"><section className="compare-modal"><div className="drawer-head"><div><span className="eyebrow">Decision, simplified</span><h2>Three different kinds of right</h2></div><button className="icon-button" onClick={onClose}><X /></button></div><div className="compare-grid">{camps.map((camp) => <article key={camp.id} className={camp.id === selected.id ? "compare-card compare-card--selected" : "compare-card"}><span className="tag">{labelForStatus(camp.status)}</span><div className={camp.image ? "compare-photo" : "compare-photo photo-missing"} style={camp.image ? { backgroundImage: `url(${camp.image})` } : undefined}>{!camp.image && <TentTree size={26} />}</div><h3>{camp.name}</h3><p>{camp.reason}</p><dl><div><dt>Match</dt><dd>{camp.score}</dd></div><div><dt>Drive</dt><dd>{formatDrive(camp.driveMinutes)}</dd></div><div><dt>Low</dt><dd>{camp.lowC ? `${camp.lowC}°C` : "Live fetch"}</dd></div><div><dt>Cost</dt><dd>{camp.price ? `₩${money.format(camp.price)}` : "Verify"}</dd></div></dl><small className="tradeoff"><AlertTriangle size={14} /> {camp.tradeoff}</small><button onClick={() => onSelect(camp)}>{camp.id === selected.id ? "Selected" : "Choose this camp"}</button></article>)}</div></section></div>;
 }
 
 function ProfileModal({ profile, onSave, onClose }: { profile: CamperProfile; onSave: (profile: CamperProfile) => void; onClose: () => void }) {
@@ -343,8 +355,16 @@ function ProfileModal({ profile, onSave, onClose }: { profile: CamperProfile; on
 
 function TripSettingsModal({ settings, searching, onSave, onClose }: { settings: TripSettings; searching: boolean; onSave: (settings: TripSettings) => void | Promise<void>; onClose: () => void }) {
   const [draft, setDraft] = useState(settings);
-  const origins: Record<string, [number, number]> = { Seoul: [126.978, 37.5665], Incheon: [126.7052, 37.4563], Daejeon: [127.3845, 36.3504], Busan: [129.0756, 35.1796] };
-  return <div className="overlay overlay--center"><section className="profile-modal" role="dialog" aria-modal="true" aria-label="Trip search settings"><div className="drawer-head"><div><span className="eyebrow">AI-powered live search</span><h2>Trip details</h2></div><button className="icon-button" onClick={onClose} aria-label="Close trip settings"><X /></button></div><div className="profile-form"><label>Departure city<select value={draft.originName} onChange={(e) => setDraft({ ...draft, originName: e.target.value, origin: origins[e.target.value] })}>{Object.keys(origins).map((name) => <option key={name}>{name}</option>)}</select></label><label>Travelers<input min="1" max="12" type="number" value={draft.travelers} onChange={(e) => setDraft({ ...draft, travelers: Number(e.target.value) })} /></label><label>Start date<input type="date" value={draft.startDate} onChange={(e) => setDraft({ ...draft, startDate: e.target.value })} /></label><label>End date<input type="date" min={draft.startDate} value={draft.endDate} onChange={(e) => setDraft({ ...draft, endDate: e.target.value })} /></label><label>Budget (KRW)<input min="0" step="10000" type="number" value={draft.budget} onChange={(e) => setDraft({ ...draft, budget: Number(e.target.value) })} /></label><label>Maximum drive<select value={draft.maxDriveMinutes} onChange={(e) => setDraft({ ...draft, maxDriveMinutes: Number(e.target.value) })}><option value="60">1 hour</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option></select></label></div><button className="primary full" disabled={searching || !draft.startDate || !draft.endDate || draft.endDate < draft.startDate} onClick={() => onSave(draft)}>{searching ? "Scout is searching live data…" : "Search with Scout AI"} {searching ? <span className="spinner" /> : <Save size={17} />}</button></section></div>;
+  const [originQuery, setOriginQuery] = useState(settings.originName);
+  const [places, setPlaces] = useState<{ label: string; coordinates: [number, number] }[]>([]);
+  const [geocoding, setGeocoding] = useState(false);
+  async function findOrigin() {
+    if (originQuery.trim().length < 2) return;
+    setGeocoding(true);
+    try { const response = await fetch(`/api/geocode?q=${encodeURIComponent(originQuery.trim())}`); const body = await response.json() as { places?: typeof places }; setPlaces(body.places || []); }
+    finally { setGeocoding(false); }
+  }
+  return <div className="overlay overlay--center"><section className="profile-modal" role="dialog" aria-modal="true" aria-label="Trip search settings"><div className="drawer-head"><div><span className="eyebrow">AI-powered nationwide search</span><h2>Trip details</h2></div><button className="icon-button" onClick={onClose} aria-label="Close trip settings"><X /></button></div><div className="profile-form"><label className="origin-field">Departure place<div><input value={originQuery} onChange={(event) => setOriginQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void findOrigin(); } }} placeholder="Address, station or city" /><button type="button" onClick={findOrigin} disabled={geocoding}>{geocoding ? <span className="spinner spinner--blue" /> : <Search size={17} />}</button></div>{Boolean(places.length) && <span className="geocode-results">{places.map((place) => <button type="button" key={`${place.coordinates.join("-")}-${place.label}`} onClick={() => { setDraft({ ...draft, originName: place.label, origin: place.coordinates }); setOriginQuery(place.label); setPlaces([]); }}>{place.label}</button>)}</span>}<small>Selected: {draft.originName}</small></label><label>Search range<select value={draft.scope} onChange={(event) => setDraft({ ...draft, scope: event.target.value as TripSettings["scope"] })}><option value="nationwide">All of South Korea</option><option value="drive">Within maximum drive</option><option value="drawn">Area drawn on map</option></select></label><label>Travelers<input min="1" max="12" type="number" value={draft.travelers} onChange={(e) => setDraft({ ...draft, travelers: Number(e.target.value) })} /></label><label>Start date<input type="date" value={draft.startDate} onChange={(e) => setDraft({ ...draft, startDate: e.target.value })} /></label><label>End date<input type="date" min={draft.startDate} value={draft.endDate} onChange={(e) => setDraft({ ...draft, endDate: e.target.value })} /></label><label>Budget (KRW)<input min="0" step="10000" type="number" value={draft.budget} onChange={(e) => setDraft({ ...draft, budget: Number(e.target.value) })} /></label><label>Maximum drive<select value={draft.maxDriveMinutes} onChange={(e) => setDraft({ ...draft, maxDriveMinutes: Number(e.target.value) })}><option value="60">1 hour</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option><option value="360">6 hours</option></select></label></div><button className="primary full" disabled={searching || !draft.startDate || !draft.endDate || draft.endDate < draft.startDate} onClick={() => onSave(draft)}>{searching ? "CamperLife is searching live data…" : "Search with CamperLife AI"} {searching ? <span className="spinner" /> : <Save size={17} />}</button></section></div>;
 }
 
 function OpenRouterModal({ initialKey, connected, managed, onConnect, onDisconnect, onClose }: { initialKey: string; connected: boolean; managed: boolean; onConnect: (key: string) => Promise<void>; onDisconnect: () => void; onClose: () => void }) {

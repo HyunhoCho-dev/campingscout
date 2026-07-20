@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
   try {
     const result = await openRouter(apiKey).chat.completions.create({
       model: MODEL,
-      messages: [{ role: "user", content: "Reply with exactly: CampingScout connected" }],
+      messages: [{ role: "user", content: "Reply with exactly: CamperLife connected" }],
       max_tokens: 20,
       temperature: 0,
     });

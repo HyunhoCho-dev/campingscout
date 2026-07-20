@@ -2,24 +2,25 @@ import { NextRequest, NextResponse } from "next/server";
 import type { Campground } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
-const REPRESENTATIVE_IMAGE = "https://images.unsplash.com/photo-1504280390367-361c6d9f38f4?auto=format&fit=crop&w=1200&q=88";
+type SearchAreaOptions = { nationwide?: boolean; polygon?: [number, number][] };
 
 export async function GET(request: NextRequest) {
   const latitude = clamp(Number(request.nextUrl.searchParams.get("latitude")) || 37.5665, -90, 90);
   const longitude = clamp(Number(request.nextUrl.searchParams.get("longitude")) || 126.978, -180, 180);
   const radius = clamp(Number(request.nextUrl.searchParams.get("radius")) || 120000, 1000, 200000);
+  const nationwide = request.nextUrl.searchParams.get("nationwide") === "true";
 
   try {
-    return NextResponse.json(await searchCampgrounds(latitude, longitude, radius), { headers: { "Cache-Control": "no-store, max-age=0" } });
+    return NextResponse.json(await searchCampgrounds(latitude, longitude, radius, { nationwide }), { headers: { "Cache-Control": "no-store, max-age=0" } });
   } catch (error) {
     console.error("OpenStreetMap campground lookup failed", error instanceof Error ? error.message : "unknown error");
     return NextResponse.json({ camps: [], source: "Live campground providers unavailable", live: false, error: "Could not load factual campground data" }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
 }
 
-export async function searchCampgrounds(latitude: number, longitude: number, radius: number) {
+export async function searchCampgrounds(latitude: number, longitude: number, radius: number, options: SearchAreaOptions = {}) {
   const jobs: Promise<{ camps: Campground[]; source: string }>[] = [
-    fetchOverpass(latitude, longitude, Math.min(radius, 200000)).then((camps) => ({ camps, source: "OpenStreetMap Overpass" })),
+    fetchOverpass(latitude, longitude, Math.min(radius, 200000), options).then((camps) => ({ camps, source: "OpenStreetMap Overpass" })),
   ];
   if (process.env.GOCAMPING_SERVICE_KEY) jobs.push(fetchGoCamping(latitude, longitude, radius, process.env.GOCAMPING_SERVICE_KEY).then((camps) => ({ camps, source: "KTO GoCamping" })));
   const settled = await Promise.allSettled(jobs);
@@ -33,13 +34,14 @@ export async function searchCampgrounds(latitude: number, longitude: number, rad
     const key = `${camp.name.toLowerCase()}-${camp.coordinates[0].toFixed(3)}-${camp.coordinates[1].toFixed(3)}`;
     if (!unique.has(key)) unique.set(key, camp);
   });
-  const camps = [...unique.values()].sort((a, b) => a.distanceKm - b.distanceKm).slice(0, 80);
+  const all = [...unique.values()];
+  const camps = options.nationwide ? geographicallyDiverse(all, 180) : all.sort((a, b) => a.distanceKm - b.distanceKm).slice(0, options.polygon?.length ? 160 : 80);
   return { camps, source: `${successful.map((item) => item.source).join(" + ")} · live factual records`, live: true };
 }
 
 async function fetchGoCamping(latitude: number, longitude: number, radius: number, serviceKey: string) {
   const url = new URL("https://apis.data.go.kr/B551011/GoCamping/locationBasedList");
-  Object.entries({ serviceKey, mapX: String(longitude), mapY: String(latitude), radius: String(radius), numOfRows: "100", pageNo: "1", MobileOS: "ETC", MobileApp: "CampingScout", _type: "json" }).forEach(([key, value]) => url.searchParams.set(key, value));
+  Object.entries({ serviceKey, mapX: String(longitude), mapY: String(latitude), radius: String(radius), numOfRows: "100", pageNo: "1", MobileOS: "ETC", MobileApp: "CamperLife", _type: "json" }).forEach(([key, value]) => url.searchParams.set(key, value));
   const response = await fetch(url, { signal: AbortSignal.timeout(12000) });
   if (!response.ok) throw new Error(`GoCamping returned ${response.status}`);
   const payload = await response.json() as { response?: { body?: { items?: { item?: Record<string, string> | Record<string, string>[] } } } };
@@ -47,15 +49,20 @@ async function fetchGoCamping(latitude: number, longitude: number, radius: numbe
   return (Array.isArray(raw) ? raw : raw ? [raw] : []).map(normalizeGoCamping).filter((camp): camp is Campground => Boolean(camp));
 }
 
-async function fetchOverpass(latitude: number, longitude: number, radius: number) {
-  const query = `[out:json][timeout:22];nwr(around:${Math.round(radius)},${latitude},${longitude})["tourism"="camp_site"];out tags center qt 120;`;
+async function fetchOverpass(latitude: number, longitude: number, radius: number, options: SearchAreaOptions) {
+  const selector = options.polygon?.length && options.polygon.length >= 3
+    ? `nwr(poly:"${options.polygon.slice(0, 30).map(([lon, lat]) => `${lat} ${lon}`).join(" ")}")["tourism"="camp_site"];`
+    : options.nationwide
+      ? `area["ISO3166-1"="KR"][boundary="administrative"]->.country;nwr(area.country)["tourism"="camp_site"];`
+      : `nwr(around:${Math.round(radius)},${latitude},${longitude})["tourism"="camp_site"];`;
+  const query = `[out:json][timeout:25];${selector}out tags center qt ${options.nationwide ? 700 : 240};`;
   const endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
   let lastError: unknown;
   for (const endpoint of endpoints) {
     try {
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CampingScout/1.0" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" },
         body: new URLSearchParams({ data: query }),
         signal: AbortSignal.timeout(26000),
       });
@@ -72,7 +79,7 @@ async function fetchPhoton(latitude: number, longitude: number, radius: number) 
   const results = await Promise.all(terms.map(async (term) => {
     const url = new URL("https://photon.komoot.io/api/");
     Object.entries({ q: term, lat: String(latitude), lon: String(longitude), limit: "50" }).forEach(([key, value]) => url.searchParams.set(key, value));
-    const response = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "CampingScout/1.0" }, signal: AbortSignal.timeout(15000) });
+    const response = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "CamperLife/1.0" }, signal: AbortSignal.timeout(15000) });
     if (!response.ok) throw new Error(`Photon returned ${response.status}`);
     return (await response.json() as { features?: PhotonFeature[] }).features || [];
   }));
@@ -108,7 +115,7 @@ function normalizeOverpass(item: OverpassElement, index: number, originLat: numb
     dogFriendly: /^(yes|leashed|permissive)$/i.test(dogTag || "") ? true : /^(no|private)$/i.test(dogTag || "") ? false : null,
     status: "verify", reason: "Live factual campground candidate awaiting AI ranking against this traveler and trip.",
     tradeoff: "Unlisted price, availability, and policies must be verified with the operator.",
-    image: safeUrl(tags.image) || REPRESENTATIVE_IMAGE, source: `OpenStreetMap ${sourceId} via Overpass`, checkedAt: new Date().toISOString(), quiet: 50, wild: 50,
+    image: safeUrl(tags.image) || commonsImage(tags.wikimedia_commons) || "", source: `OpenStreetMap ${sourceId} via Overpass`, checkedAt: new Date().toISOString(), quiet: 50, wild: 50,
     bookingUrl: safeUrl(tags.reservation || tags.website || tags["contact:website"]),
   };
 }
@@ -125,7 +132,7 @@ function normalizePhoton(item: PhotonFeature, index: number, originLat: number, 
     highC: 0, lowC: 0, rainChance: 0, gustKph: 0, facilities: ["Verify facilities"], dogFriendly: null,
     status: index === 0 ? "best" : index === 1 ? "safe" : index === 2 ? "wild" : "verify",
     reason: "A real OpenStreetMap campground result. DeepSeek ranks it against your constraints without inventing missing facts.", tradeoff: "Facilities, price, availability, and pet rules are absent from this search record and require operator confirmation.",
-    image: REPRESENTATIVE_IMAGE, source: `OpenStreetMap ${osmType} ${osmId} via Photon`, checkedAt: new Date().toISOString(), quiet: 55 + index % 5 * 8, wild: 50 + index % 4 * 10,
+    image: "", source: `OpenStreetMap ${osmType} ${osmId} via Photon`, checkedAt: new Date().toISOString(), quiet: 55 + index % 5 * 8, wild: 50 + index % 4 * 10,
   };
 }
 
@@ -140,12 +147,20 @@ function normalizeGoCamping(item: Record<string, string>, index: number): Campgr
     highC: 0, lowC: 0, rainChance: 0, gustKph: 0, facilities: String(item.sbrsCl || "Verify facilities").split(",").map((value) => value.trim()).filter(Boolean).slice(0, 6),
     dogFriendly: /가능/.test(item.animalCmgCl || ""), status: index === 0 ? "best" : index === 1 ? "safe" : index === 2 ? "wild" : "verify",
     reason: item.intro || "A live GoCamping public-data record matching the current search radius.", tradeoff: "Live price, availability, and operator policies must be confirmed.",
-    image: safeUrl(item.firstImageUrl) || REPRESENTATIVE_IMAGE, source: `GoCamping content ${item.contentId || index}`, checkedAt: new Date().toISOString(), quiet: 55 + (index * 7) % 40, wild: 45 + (index * 11) % 50,
+    image: safeUrl(item.firstImageUrl) || "", source: `GoCamping content ${item.contentId || index}`, checkedAt: new Date().toISOString(), quiet: 55 + (index * 7) % 40, wild: 45 + (index * 11) % 50,
     bookingUrl: safeUrl(item.resveUrl || item.homepage),
   };
 }
 
 function safeUrl(value?: string) { if (!value) return undefined; try { const url = new URL(value); return /https?:/.test(url.protocol) ? url.toString() : undefined; } catch { return undefined; } }
+function commonsImage(value?: string) { if (!value || !/^File:/i.test(value)) return undefined; return `https://commons.wikimedia.org/wiki/Special:Redirect/file/${encodeURIComponent(value.replace(/^File:/i, ""))}`; }
 function yes(value?: string) { return /^(yes|designated|customers|permissive)$/i.test(value || ""); }
 function clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(max, value)); }
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number) { const toRad = (value: number) => value * Math.PI / 180; const dLat = toRad(lat2 - lat1); const dLon = toRad(lon2 - lon1); const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2; return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)); }
+function geographicallyDiverse(camps: Campground[], limit: number) {
+  const buckets = new Map<string, Campground[]>();
+  camps.forEach((camp) => { const key = `${Math.floor(camp.coordinates[1] * 2)}:${Math.floor(camp.coordinates[0] * 2)}`; buckets.set(key, [...(buckets.get(key) || []), camp]); });
+  const result: Campground[] = []; let index = 0; const groups = [...buckets.values()].map((group) => group.sort((a, b) => a.distanceKm - b.distanceKm));
+  while (result.length < limit && groups.some((group) => index < group.length)) { for (const group of groups) if (group[index] && result.length < limit) result.push(group[index]); index += 1; }
+  return result;
+}

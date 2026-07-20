@@ -39,6 +39,17 @@ export type WeatherSnapshot = {
 
 export type Preference = { wild: number; quiet: number };
 
+export type RouteStop = {
+  id: string;
+  type: "attraction" | "restaurant";
+  name: string;
+  area: string;
+  coordinates: [number, number];
+  reason: string;
+  visitOrder: number;
+  source: string;
+};
+
 export type PlanResponse = {
   summary: string;
   changes: string[];
@@ -55,5 +66,6 @@ export type PlanResponse = {
   };
   rankedCampIds?: string[];
   recommendations?: Array<{ id: string; score: number; reason: string; tradeoff: string; quiet: number; wild: number }>;
+  routeStops?: RouteStop[];
   itinerary?: Array<{ time: string; title: string; detail: string }>;
 };

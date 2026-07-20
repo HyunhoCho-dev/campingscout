@@ -1,14 +1,16 @@
-# CampingScout
+# CamperLife
 
 > Find your kind of wild.
 
-CampingScout is an evidence-aware AI camping planner built for OpenAI Build Week. It turns a departure point, dates, party, budget, gear, and “wild vs. convenient / quiet vs. popular” preferences into ranked campground choices, route-aware trip plans, and explicit equipment warnings.
+CamperLife is an evidence-aware AI camping planner built for OpenAI Build Week. It turns any Korean departure point, dates, party, budget, gear, map-drawn search area, and “wild vs. convenient / quiet vs. popular” preferences into nationally sourced campground choices, route-aware trip plans, and explicit equipment warnings.
 
-![CampingScout social preview](public/og.png)
+![CamperLife social preview](public/og.png)
 
 ## Why it matters
 
-Camping search is fragmented across campground directories, weather pages, maps, operator sites, and gear checklists. CampingScout combines those inputs but keeps their provenance visible: public-data facts, live forecasts, routing results, and AI recommendations are labeled separately. It never presents AI inference as live availability or official safety advice.
+Camping search is fragmented across campground directories, weather pages, maps, operator sites, and gear checklists. CamperLife combines those inputs but keeps their provenance visible: public-data facts, live forecasts, routing results, and AI recommendations are labeled separately. It never presents AI inference as live availability or official safety advice.
+
+The live search pipeline geocodes a user-selected origin, searches OpenStreetMap/GoCamping records nationwide or inside a drawn polygon, calculates road metrics and weather, lets DeepSeek V4 Flash rank only those factual candidates, retrieves nearby real attractions and restaurants, and redraws a multi-stop road route on the map. Korean and English AI output can be selected from the header.
 
 ## Product capabilities
 
