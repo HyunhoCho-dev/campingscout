@@ -1,0 +1,17 @@
+node_modules
+node_modules_incomplete
+.next
+.next_incomplete
+out
+.env
+.env.local
+.env.*.local
+!.env.example
+*.log
+*.tsbuildinfo
+.DS_Store
+coverage
+dist
+.wrangler
+qa-*.png
+*.tar.gz

@@ -1,0 +1,46 @@
+export type CampStatus = "best" | "safe" | "wild" | "verify" | "risk";
+
+export type Campground = {
+  id: string;
+  name: string;
+  area: string;
+  landscape: string;
+  coordinates: [number, number];
+  score: number;
+  driveMinutes: number;
+  distanceKm: number;
+  price: number;
+  highC: number;
+  lowC: number;
+  rainChance: number;
+  gustKph: number;
+  facilities: string[];
+  dogFriendly: boolean;
+  status: CampStatus;
+  reason: string;
+  tradeoff: string;
+  image: string;
+  source: string;
+  checkedAt: string;
+  quiet: number;
+  wild: number;
+  bookingUrl?: string;
+};
+
+export type WeatherSnapshot = {
+  highC: number;
+  lowC: number;
+  rainChance: number;
+  gustKph: number;
+  fetchedAt: string;
+  live: boolean;
+};
+
+export type Preference = { wild: number; quiet: number };
+
+export type PlanResponse = {
+  summary: string;
+  changes: string[];
+  packing: string[];
+  source: "gpt-5.6" | "demo";
+};
