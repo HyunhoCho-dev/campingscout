@@ -30,13 +30,13 @@ export async function POST(request: NextRequest) {
 
   try {
     const client = openRouter(apiKey);
-    const intent = validateIntent(await completeJson(client, [
+    const preliminaryDrive = clamp(payload.trip?.maxDriveMinutes, 15, 240, 120);
+    const preliminaryRadius = Math.min(200000, Math.max(50000, preliminaryDrive * 1300));
+    const [rawIntent, factual] = await Promise.all([completeJson(client, [
       { role: "system", content: "You are CampingScout's search controller. Translate the traveler, profile, trip settings, and request into strict JSON search constraints. Do not invent facts." },
       { role: "user", content: `Return JSON with querySummary, quiet (0-100), wild (0-100), maxDriveMinutes (15-240), budget (KRW integer), dogFriendly (boolean), requiredFacilities (string array). Preserve explicit UI values unless the request changes them. Infer dogFriendly from the party/profile when a dog is present. Input:\n${JSON.stringify(payload)}` },
-    ]), payload);
-
-    const radius = Math.min(200000, Math.max(50000, intent.maxDriveMinutes * 1300));
-    const factual = await searchCampgrounds(origin[1], origin[0], radius);
+    ]), searchCampgrounds(origin[1], origin[0], preliminaryRadius)]);
+    const intent = validateIntent(rawIntent, payload);
     if (!factual.camps.length) return NextResponse.json({ error: "No live campground records were found for this search area", source: factual.source }, { status: 404 });
 
     const routed = await enrichRoutes(origin, factual.camps.slice(0, 60));
@@ -109,19 +109,11 @@ async function enrichRoutes(origin: [number, number], camps: Campground[]) {
 }
 
 async function enrichWeather(camps: Campground[], startDate: string, endDate: string) {
-  const enriched = await Promise.all(camps.slice(0, 12).map(async (camp) => {
-    try {
-      const url = new URL("https://api.open-meteo.com/v1/forecast");
-      url.searchParams.set("latitude", String(camp.coordinates[1])); url.searchParams.set("longitude", String(camp.coordinates[0]));
-      url.searchParams.set("daily", "temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_gusts_10m_max"); url.searchParams.set("timezone", "Asia/Seoul");
-      if (/^\d{4}-\d{2}-\d{2}$/.test(startDate) && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) { url.searchParams.set("start_date", startDate); url.searchParams.set("end_date", endDate); } else url.searchParams.set("forecast_days", "3");
-      const response = await fetch(url, { signal: AbortSignal.timeout(10000) }); if (!response.ok) throw new Error(`Open-Meteo returned ${response.status}`);
-      const data = await response.json() as { daily?: { temperature_2m_max?: number[]; temperature_2m_min?: number[]; precipitation_probability_max?: number[]; wind_gusts_10m_max?: number[] } };
-      const daily = data.daily; if (!daily?.temperature_2m_max?.length || !daily.temperature_2m_min?.length) throw new Error("Open-Meteo returned no forecast");
-      return { ...camp, highC: Math.round(Math.max(...daily.temperature_2m_max)), lowC: Math.round(Math.min(...daily.temperature_2m_min)), rainChance: Math.round(Math.max(...(daily.precipitation_probability_max || [0]))), gustKph: Math.round(Math.max(...(daily.wind_gusts_10m_max || [0]))) };
-    } catch { return fetchMetCampWeather(camp, startDate, endDate); }
-  }));
-  return [...enriched, ...camps.slice(12)];
+  const targets = camps.slice(0, 9); const enriched: Campground[] = [];
+  for (let index = 0; index < targets.length; index += 3) {
+    enriched.push(...await Promise.all(targets.slice(index, index + 3).map((camp) => fetchMetCampWeather(camp, startDate, endDate))));
+  }
+  return [...enriched, ...camps.slice(9)];
 }
 
 async function fetchMetCampWeather(camp: Campground, startDate: string, endDate: string) {
