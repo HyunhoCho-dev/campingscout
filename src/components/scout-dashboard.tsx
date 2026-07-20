@@ -128,7 +128,7 @@ export function ScoutDashboard() {
   useEffect(() => { window.localStorage.setItem("campingscout-trip", JSON.stringify(trip)); }, [trip]);
 
   const lowC = weather?.lowC ?? selected.lowC;
-  const gearMismatch = lowC < profile.sleepingBagComfortC;
+  const gearMismatch = lowC !== 0 && lowC < profile.sleepingBagComfortC;
 
   function chooseCamp(camp: Campground) {
     setWeather(null);
@@ -291,7 +291,7 @@ export function ScoutDashboard() {
           <div className="fact-grid">
             <Fact icon={<Car />} value={`${formatDrive(navigation?.driveMinutes ?? selected.driveMinutes)} drive`} detail={`${navigation?.distanceKm ?? selected.distanceKm} km from ${trip.originName}`} />
             <Fact icon={<WalletCards />} value={selected.price ? `₩${money.format(selected.price)}` : "Check operator"} detail={selected.price ? "Estimated site total" : "Public data has no verified price"} />
-            <Fact icon={<CloudSun />} value={`${weather?.highC ?? selected.highC}° / ${lowC}°C`} detail={weather?.live ? "Live Open-Meteo forecast" : "Demo forecast"} />
+            <Fact icon={<CloudSun />} value={(weather?.highC ?? selected.highC) || lowC ? `${weather?.highC ?? selected.highC}° / ${lowC}°C` : "Forecast unavailable"} detail={weather?.live ? "Live Open-Meteo forecast" : "No invented weather values"} />
             <Fact icon={<ShowerHead />} value="Essential facilities" detail={selected.facilities.join(", ")} />
             <Fact icon={<PawPrint />} value={selected.dogFriendly === true ? "Dog friendly" : selected.dogFriendly === false ? "No dogs" : "Verify pet policy"} detail={selected.dogFriendly === null ? "Not present in public record" : "Policy reported"} />
             <Fact icon={<ShieldCheck />} value="Source-aware" detail={selected.checkedAt} />

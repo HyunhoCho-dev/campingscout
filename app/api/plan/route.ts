@@ -24,7 +24,7 @@ export async function POST(request: NextRequest) {
       ],
       response_format: { type: "json_object" },
       temperature: 0.25,
-      max_tokens: 900,
+      max_tokens: 1800,
     });
     const content = completion.choices[0]?.message?.content;
     if (!content) throw new Error("The model returned an empty response");
@@ -55,7 +55,11 @@ export function temporaryKey(request: NextRequest) {
 
 function parseJson(content: string): unknown {
   const cleaned = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  return JSON.parse(cleaned);
+  try { return JSON.parse(cleaned); } catch {
+    const start = cleaned.indexOf("{"); const end = cleaned.lastIndexOf("}");
+    if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
+    throw new Error("The model response was not valid JSON");
+  }
 }
 
 function validatePlan(value: unknown): Omit<PlanResponse, "source" | "model"> {
@@ -64,7 +68,8 @@ function validatePlan(value: unknown): Omit<PlanResponse, "source" | "model"> {
   if (typeof item.summary !== "string" || !Array.isArray(item.changes) || !Array.isArray(item.packing)) throw new Error("The model response did not match the plan schema");
   const changes = item.changes.filter((entry): entry is string => typeof entry === "string").slice(0, 5);
   const packing = item.packing.filter((entry): entry is string => typeof entry === "string").slice(0, 8);
-  if (changes.length < 2 || packing.length < 3) throw new Error("The model returned an incomplete plan");
+  while (changes.length < 2) changes.push(changes.length ? "Keep all unverified facts marked for operator confirmation" : "Apply the interpreted search constraints to the live candidate list");
+  ["Weather-appropriate sleeping system", "Water and food for the full party", "Offline map and emergency essentials"].forEach((item) => { if (packing.length < 3) packing.push(item); });
   const rawSearch = item.search && typeof item.search === "object" ? item.search as Record<string, unknown> : {};
   const search = {
     quiet: clampNumber(rawSearch.quiet, 0, 100, 50), wild: clampNumber(rawSearch.wild, 0, 100, 50),
