@@ -63,7 +63,7 @@ export async function POST(request: NextRequest) {
       rawPlan = await withTimeout(completeJson(client, [
         { role: "system", content: "You are CamperLife, an evidence-aware camping search ranker. Use only supplied live facts. Never invent facts. Respond only in concise English JSON." },
         { role: "user", content: `Return strict JSON with summary, changes, packing, search, rankedCampIds, recommendations (top 6: id, score, reason, tradeoff, quiet, wild), itinerary (4-6 items), and routeStopIds (0-4 supplied place IDs). If selectedCampId exists, rank it first unless a hard supplied fact makes it unsafe. Route stops must belong to the first camp and include at most one restaurant.\nIntent:${JSON.stringify(intent)}\nTraveler:${JSON.stringify(payload)}\nCamps:${JSON.stringify(candidateFacts)}\nPlaces:${JSON.stringify(nearby)}` },
-      ]), 18_000);
+      ]), 10_000);
     } catch {
       aiUsed = false; rawPlan = factualFallback(intent, weatherEnriched, nearby, selectedCampId);
     }
@@ -104,7 +104,7 @@ type NearbyPlace = { id: string; campId: string; type: "attraction" | "restauran
 async function fetchNearbyPlaces(campId: string, [longitude, latitude]: [number, number]): Promise<NearbyPlace[]> {
   const query = `[out:json][timeout:16];(nwr(around:18000,${latitude},${longitude})["tourism"~"attraction|museum|viewpoint|theme_park|zoo|gallery"]["name"];nwr(around:12000,${latitude},${longitude})["amenity"="restaurant"]["name"];);out tags center qt 70;`;
   try {
-    const response = await fetch("https://overpass.kumi.systems/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" }, body: new URLSearchParams({ data: query }), signal: AbortSignal.timeout(7000) });
+    const response = await fetch("https://overpass.kumi.systems/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" }, body: new URLSearchParams({ data: query }), signal: AbortSignal.timeout(3500) });
     if (!response.ok) throw new Error("Nearby place lookup failed"); const data = await response.json() as { elements?: Array<{ type: string; id: number; lat?: number; lon?: number; center?: { lat?: number; lon?: number }; tags?: Record<string, string> }> };
     return (data.elements || []).flatMap((item) => {
       const lat = item.lat ?? item.center?.lat; const lon = item.lon ?? item.center?.lon; const tags = item.tags || {}; if (!Number.isFinite(lat) || !Number.isFinite(lon) || !tags.name) return [];
@@ -118,7 +118,7 @@ async function fetchNearbyPhoton(campId: string, longitude: number, latitude: nu
   const queries: Array<{ query: string; type: "attraction" | "restaurant" }> = [{ query: "tourist attraction", type: "attraction" }, { query: "restaurant", type: "restaurant" }];
   const settled = await Promise.allSettled(queries.map(async ({ query, type }) => {
     const url = new URL("https://photon.komoot.io/api/"); url.searchParams.set("q", query); url.searchParams.set("lat", String(latitude)); url.searchParams.set("lon", String(longitude)); url.searchParams.set("limit", "20");
-    const response = await fetch(url, { headers: { "User-Agent": "CamperLife/1.0" }, signal: AbortSignal.timeout(6000) }); if (!response.ok) return [];
+    const response = await fetch(url, { headers: { "User-Agent": "CamperLife/1.0" }, signal: AbortSignal.timeout(3000) }); if (!response.ok) return [];
     const data = await response.json() as { features?: Array<{ geometry?: { coordinates?: [number, number] }; properties?: Record<string, string | number> }> };
     return (data.features || []).flatMap((feature) => { const coordinates = feature.geometry?.coordinates; const props = feature.properties || {}; if (!coordinates || String(props.countrycode || "").toUpperCase() !== "KR" || !props.name || haversine(latitude, longitude, coordinates[1], coordinates[0]) > 22) return []; return [{ id: `poi-photon-${props.osm_type || "p"}-${props.osm_id || `${coordinates[0]}-${coordinates[1]}`}`, campId, type, name: String(props.name), area: [props.city, props.county, props.state].filter(Boolean).join(", ") || "Near campground", coordinates, source: `OpenStreetMap ${props.osm_type || "place"} ${props.osm_id || "record"} via Photon` } satisfies NearbyPlace]; });
   }));
