@@ -42,13 +42,13 @@ export async function POST(request: NextRequest) {
     const intent = intentFromInput(payload);
     if (!factual.camps.length) return NextResponse.json({ error: "No live campground records were found for this search area", source: factual.source }, { status: 404 });
 
-    const baseTargets = nationwide ? geographicallyDiverse(factual.camps, 16) : factual.camps.slice(0, 16);
+    const baseTargets = nationwide ? geographicallyDiverse(factual.camps, 10) : factual.camps.slice(0, 10);
     const selectedTarget = selectedCampId ? factual.camps.find((camp) => camp.id === selectedCampId) : undefined;
-    const routeTargets = selectedTarget ? [selectedTarget, ...baseTargets.filter((camp) => camp.id !== selectedTarget.id)].slice(0, 16) : baseTargets;
+    const routeTargets = selectedTarget ? [selectedTarget, ...baseTargets.filter((camp) => camp.id !== selectedTarget.id)].slice(0, 10) : baseTargets;
     const nearbyTargets = (selectedTarget ? [selectedTarget, ...baseTargets.filter((camp) => camp.id !== selectedTarget.id)] : baseTargets).slice(0, 2);
     const [routed, nearbyGroups] = await Promise.all([enrichRoutes(origin, routeTargets), Promise.all(nearbyTargets.map((camp) => fetchNearbyPlaces(camp.id, camp.coordinates)))]);
     const withinDrive = routed.filter((camp) => !camp.driveMinutes || camp.driveMinutes <= intent.maxDriveMinutes + 15);
-    const candidates = (withinDrive.length >= 8 ? withinDrive : routed).slice(0, 16);
+    const candidates = (withinDrive.length >= 6 ? withinDrive : routed).slice(0, 10);
     const weatherEnriched = forecastIsAvailable(String(payload.trip?.startDate || "")) ? await enrichWeather(candidates, String(payload.trip?.startDate || ""), String(payload.trip?.endDate || "")) : candidates;
     const candidateFacts = weatherEnriched.map((camp) => ({
       id: camp.id, name: camp.name, area: camp.area, landscape: camp.landscape,
@@ -58,10 +58,15 @@ export async function POST(request: NextRequest) {
       dataCompleteness: (camp.name && !/^Campground \d+$/i.test(camp.name) ? 1 : 0) + (camp.area !== "Korea" ? 1 : 0) + (camp.facilities[0] !== "Verify facilities" ? 1 : 0) + (camp.bookingUrl ? 1 : 0) + (camp.dogFriendly !== null ? 1 : 0),
     }));
     const nearby = nearbyGroups.flat();
-    const rawPlan = await completeJson(client, [
-      { role: "system", content: "You are CamperLife, an evidence-aware camping search ranker. Use only supplied live candidates, road metrics, weather, profile, map area, and trip facts. Never invent facts. Unknown pet policy is not proof of dog friendliness. Respond only in English." },
-      { role: "user", content: `Rank the factual candidates and build the complete trip plan in one response. Return strict JSON with summary, changes (2-5 strings), packing (3-8 strings), search (the supplied intent fields), rankedCampIds (candidate IDs only, best first), recommendations (top 12 objects: id, score 0-100, reason, tradeoff, quiet 0-100, wild 0-100), itinerary (4-8 objects: time, title, detail), and routeStopIds (0-5 supplied place IDs in visit order). If selectedCampId is supplied and exists in the facts, rank it first unless a supplied hard fact makes it unsafe or impossible. Route stops must belong to the campground ranked first, avoid excessive detours, and normally include at most one restaurant. Make every explanation traceable to supplied facts and mark facts requiring operator verification. Prefer identifiable records with higher dataCompleteness.\nSearch intent:${JSON.stringify(intent)}\nTraveler input:${JSON.stringify(payload)}\nLive candidate facts:${JSON.stringify(candidateFacts)}\nLive nearby places:${JSON.stringify(nearby)}` },
-    ]);
+    let aiUsed = true; let rawPlan: unknown;
+    try {
+      rawPlan = await withTimeout(completeJson(client, [
+        { role: "system", content: "You are CamperLife, an evidence-aware camping search ranker. Use only supplied live facts. Never invent facts. Respond only in concise English JSON." },
+        { role: "user", content: `Return strict JSON with summary, changes, packing, search, rankedCampIds, recommendations (top 6: id, score, reason, tradeoff, quiet, wild), itinerary (4-6 items), and routeStopIds (0-4 supplied place IDs). If selectedCampId exists, rank it first unless a hard supplied fact makes it unsafe. Route stops must belong to the first camp and include at most one restaurant.\nIntent:${JSON.stringify(intent)}\nTraveler:${JSON.stringify(payload)}\nCamps:${JSON.stringify(candidateFacts)}\nPlaces:${JSON.stringify(nearby)}` },
+      ]), 18_000);
+    } catch {
+      aiUsed = false; rawPlan = factualFallback(intent, weatherEnriched, nearby, selectedCampId);
+    }
     const plan = validateSearchPlan(rawPlan, intent, new Set(weatherEnriched.map((camp) => camp.id)));
     const topCamp = plan.rankedCampIds?.length ? weatherEnriched.find((camp) => camp.id === plan.rankedCampIds![0]) : undefined;
     const finalPlan = topCamp ? applyRoutePlan(plan, rawPlan, nearby, topCamp.id) : plan;
@@ -82,8 +87,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       camps: rankedCamps,
-      plan: { ...finalPlan, source: "deepseek-v4-flash", model: MODEL } satisfies PlanResponse,
-      source: `${factual.source} + OSRM road matrix + live weather + nearby OSM places + DeepSeek ranking`,
+      plan: { ...finalPlan, source: aiUsed ? "deepseek-v4-flash" : "demo", model: aiUsed ? MODEL : "factual-timeout-fallback" } satisfies PlanResponse,
+      source: `${factual.source} + OSRM road matrix + live weather + nearby OSM places + ${aiUsed ? "DeepSeek ranking" : "fast factual fallback (AI timeout)"}`,
       counts: { discovered: factual.camps.length, routed: routed.filter((camp) => camp.driveMinutes > 0).length, weather: weatherEnriched.filter((camp) => camp.lowC || camp.highC).length, ranked: finalPlan.rankedCampIds?.length || 0, places: nearby.length },
       live: true,
     }, { headers: { "Cache-Control": "no-store" } });
@@ -186,6 +191,12 @@ function validCampSnapshot(value: unknown): Campground[] {
     if (typeof camp.id !== "string" || typeof camp.name !== "string" || !validCoordinate(camp.coordinates) || !/^(OpenStreetMap|GoCamping)/.test(String(camp.source || ""))) return [];
     return [{ ...camp, name: camp.name.slice(0, 160), area: String(camp.area || "Korea").slice(0, 240), facilities: Array.isArray(camp.facilities) ? camp.facilities.filter((item): item is string => typeof item === "string").slice(0, 8) : ["Verify facilities"] }];
   }).slice(0, 60);
+}
+function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> { return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("AI planning timed out")), milliseconds))]); }
+function factualFallback(intent: SearchIntent, camps: Campground[], places: NearbyPlace[], selectedCampId?: string) {
+  const ranked = selectedCampId && camps.some((camp) => camp.id === selectedCampId) ? [camps.find((camp) => camp.id === selectedCampId)!, ...camps.filter((camp) => camp.id !== selectedCampId)] : camps;
+  const first = ranked[0]; const matchingPlaces = places.filter((place) => place.campId === first?.id); const attraction = matchingPlaces.find((place) => place.type === "attraction"); const restaurant = matchingPlaces.find((place) => place.type === "restaurant");
+  return { summary: `Live campground results are ready. The AI provider exceeded the 18-second limit, so CamperLife returned a factual plan for ${first?.name || "the best available camp"} without inventing missing details.`, changes: ["Applied the current profile and trip limits", "Kept unverified operator details clearly marked"], packing: ["Weather-appropriate sleep system", "Water and meals for the full party", "Offline map and emergency kit", "Booking confirmation"], search: intent, rankedCampIds: ranked.map((camp) => camp.id), recommendations: ranked.slice(0, 6).map((camp, index) => ({ id: camp.id, score: Math.max(62, 88 - index * 4), reason: camp.reason, tradeoff: camp.tradeoff, quiet: camp.quiet, wild: camp.wild })), itinerary: [{ time: "DAY 1 · MORNING", title: "Confirm the campground", detail: "Verify availability, operator rules and current alerts before departure." }, { time: "DAY 1 · DEPARTURE", title: "Leave from your selected origin", detail: `Follow the calculated road route to ${first?.name || "the campground"}.` }, ...(restaurant ? [{ time: "DAY 1 · MEAL", title: restaurant.name, detail: "A real nearby restaurant record; verify opening hours before visiting." }] : []), ...(attraction ? [{ time: "DAY 2 · EXPLORE", title: attraction.name, detail: "A real nearby attraction record included on the map route." }] : []), { time: "FINAL MORNING", title: "Pack and leave no trace", detail: "Check the site, weather and return route before leaving." }], routeStopIds: [restaurant?.id, attraction?.id].filter(Boolean) };
 }
 function forecastIsAvailable(startDate: string) { const start = /^\d{4}-\d{2}-\d{2}$/.test(startDate) ? Date.parse(`${startDate}T00:00:00+09:00`) : Date.now(); const days = (start - Date.now()) / 86_400_000; return days >= -1 && days <= 9; }
 function geographicallyDiverse(camps: Campground[], limit: number) {
