@@ -12,10 +12,10 @@ Camping search is fragmented across campground directories, weather pages, maps,
 
 ## Product capabilities
 
-- Live Korea Tourism Organization GoCamping search with a curated fallback
-- Mapbox Directions and Isochrone routing with an honest estimated fallback
-- Open-Meteo weather and sleeping-bag comfort mismatch warnings
-- DeepSeek V4 Flash through OpenRouter for structured trip and packing recommendations
+- Live Korea Tourism Organization GoCamping search, with OpenStreetMap/Photon live fallback
+- Mapbox Directions and Isochrone routing, with live OSRM/OpenStreetMap road routing fallback
+- Open-Meteo weather, automatic MET Norway fallback, and sleeping-bag comfort warnings
+- DeepSeek V4 Flash through OpenRouter for structured search filters, candidate ranking, itinerary, and packing recommendations
 - Temporary in-app OpenRouter key connection stored only in browser session storage
 - Sign in with ChatGPT on OpenAI Sites
 - Cloudflare D1 profile and saved-trip persistence
@@ -28,9 +28,9 @@ Camping search is fragmented across campground directories, weather pages, maps,
 
 ```text
 Browser (Next/Vinext UI + MapLibre)
-  ├─ /api/campgrounds  → KTO GoCamping public data
-  ├─ /api/navigation   → Mapbox Directions + Isochrone
-  ├─ /api/weather      → Open-Meteo
+  ├─ /api/campgrounds  → KTO GoCamping or OpenStreetMap/Photon
+  ├─ /api/navigation   → Mapbox Directions/Isochrone or OSRM route
+  ├─ /api/weather      → Open-Meteo or MET Norway
   ├─ /api/plan         → OpenRouter (DeepSeek V4 Flash)
   ├─ /api/openrouter/test → real provider connection test
   ├─ /api/profile      → Sign in with ChatGPT + D1
@@ -47,8 +47,8 @@ Copy `.env.example` to `.env.local` for local development, or set these in the d
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | Optional | Server-wide OpenRouter key; users may instead connect a temporary key in the UI |
 | `OPENROUTER_MODEL` | No | Defaults to `deepseek/deepseek-v4-flash` |
-| `GOCAMPING_SERVICE_KEY` | Yes | data.go.kr GoCamping service key |
-| `MAPBOX_ACCESS_TOKEN` | Yes | Server-side Directions/Isochrone requests |
+| `GOCAMPING_SERVICE_KEY` | No | Enables richer data.go.kr GoCamping records; OSM remains live without it |
+| `MAPBOX_ACCESS_TOKEN` | No | Enables isochrones; OSRM provides a live road route without it |
 | `NEXT_PUBLIC_MAP_STYLE_URL` | No | Optional MapLibre-compatible map style |
 | `NEXT_PUBLIC_SITE_URL` | Production | Canonical URL and shared-page server fetches |
 
@@ -72,12 +72,12 @@ npm audit --omit=dev
 
 ## Live vs. fallback behavior
 
-The repository works without private keys for judgeability. Every integration returns a labeled deterministic fallback when its key/provider is unavailable. A live deployment becomes fully connected by setting environment variables—no code changes are required.
+The repository works without mapping or public-data private keys for judgeability. OpenStreetMap-based search and routing are live fallbacks, while every unavailable value remains explicitly labeled. OpenRouter still requires a server secret or a temporary in-app key.
 
 - AI fallback never claims to be a live DeepSeek response.
-- GoCamping fallback is labeled as demo/curated data.
-- Routing fallback is labeled estimated and does not invent an isochrone.
-- Weather falls back to the campground snapshot and is labeled non-live.
+- GoCamping falls back to live OpenStreetMap/Photon records, not invented campground facts.
+- Routing falls back to live OSRM road geometry; no isochrone is invented.
+- Weather automatically retries with MET Norway, then shows unavailable instead of inventing values.
 - Saving requires an authenticated user and never silently creates an anonymous cloud record.
 
 ## Security and responsible use

@@ -138,28 +138,19 @@ export function ScoutDashboard() {
     window.setTimeout(() => setToast(""), 1800);
   }
 
-  function findWarmer() {
-    const alternative = [...visibleCamps].filter((camp) => camp.id !== selected.id).sort((a, b) => b.lowC - a.lowC)[0];
-    if (alternative) {
-      chooseCamp(alternative);
-      setAiPlan({
-        source: "demo",
-        summary: `${alternative.name} is the warmer alternative without giving up dog access or essential facilities.`,
-        changes: [`Overnight low improves from ${lowC}°C to ${alternative.lowC}°C`, `${formatDrive(alternative.driveMinutes)} drive from Seoul`, alternative.price ? `Estimated site cost ₩${money.format(alternative.price)}` : "Confirm live price with the operator"],
-        packing: ["Lightweight rain shell", "Dog lead and water bowl", "Warm base layer"],
-      });
-    }
-  }
-
   async function askScout(event: React.FormEvent) {
     event.preventDefault();
     if (!command.trim()) return;
+    await runScout(command.trim());
+  }
+
+  async function runScout(prompt: string) {
     setThinking(true);
     try {
       const response = await fetch("/api/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(openRouterKey ? { "X-OpenRouter-Key": openRouterKey } : {}) },
-        body: JSON.stringify({ command, selected, candidates: camps.slice(0, 30), preference, profile, trip, weather }),
+        body: JSON.stringify({ command: prompt, selected, candidates: camps.slice(0, 30), preference, profile, trip, weather }),
       });
       const result = await response.json() as PlanResponse & { error?: string };
       if (!response.ok || result.error) throw new Error(result.error || "AI planning failed");
@@ -266,7 +257,7 @@ export function ScoutDashboard() {
 
         <section className="map-stage">
           <CampMap camps={visibleCamps} selected={selected} onSelect={chooseCamp} route={navigation?.route} reach={navigation?.reach} origin={trip.origin} />
-          <div className="reach-legend"><span className="reach-swatch" /><span><strong>Driving time</strong><small>Up to {Math.round(trip.maxDriveMinutes / 60)} hours · {navigation?.live ? "live Mapbox" : "estimated"}</small></span></div>
+          <div className="reach-legend"><span className="reach-swatch" /><span><strong>Driving time</strong><small>Up to {Math.round(trip.maxDriveMinutes / 60)} hours · {navigation?.live ? `live ${navigation.source}` : "temporary estimate"}</small></span></div>
           <button className="locate-button" aria-label="Center on my location"><LocateFixed size={19} /></button>
           {mapCardOpen && <div className="selected-map-card">
             <div className="selected-map-photo" style={{ backgroundImage: `url(${selected.image})` }} />
@@ -291,7 +282,7 @@ export function ScoutDashboard() {
           <div className="fact-grid">
             <Fact icon={<Car />} value={`${formatDrive(navigation?.driveMinutes ?? selected.driveMinutes)} drive`} detail={`${navigation?.distanceKm ?? selected.distanceKm} km from ${trip.originName}`} />
             <Fact icon={<WalletCards />} value={selected.price ? `₩${money.format(selected.price)}` : "Check operator"} detail={selected.price ? "Estimated site total" : "Public data has no verified price"} />
-            <Fact icon={<CloudSun />} value={(weather?.highC ?? selected.highC) || lowC ? `${weather?.highC ?? selected.highC}° / ${lowC}°C` : "Forecast unavailable"} detail={weather?.live ? "Live Open-Meteo forecast" : "No invented weather values"} />
+            <Fact icon={<CloudSun />} value={(weather?.highC ?? selected.highC) || lowC ? `${weather?.highC ?? selected.highC}° / ${lowC}°C` : "Forecast unavailable"} detail={weather?.live ? `Live ${weather.provider || "weather"} forecast` : "No invented weather values"} />
             <Fact icon={<ShowerHead />} value="Essential facilities" detail={selected.facilities.join(", ")} />
             <Fact icon={<PawPrint />} value={selected.dogFriendly === true ? "Dog friendly" : selected.dogFriendly === false ? "No dogs" : "Verify pet policy"} detail={selected.dogFriendly === null ? "Not present in public record" : "Policy reported"} />
             <Fact icon={<ShieldCheck />} value="Source-aware" detail={selected.checkedAt} />
@@ -304,7 +295,7 @@ export function ScoutDashboard() {
           </div>
 
           <div className="why-card"><div><Sparkles size={17} /><strong>Why Scout picked it</strong></div><p>{selected.reason}</p><small><Info size={13} /> {selected.source}</small></div>
-          <div className="panel-actions"><button className="primary" onClick={() => setPlanOpen(true)}>View trip plan <Route size={17} /></button>{selected.bookingUrl ? <a className="secondary" href={selected.bookingUrl} target="_blank" rel="noreferrer">Check availability <ExternalLink size={17} /></a> : <button className="secondary" onClick={() => setToast("No verified booking link · confirm with the operator")}>Verify booking <ExternalLink size={17} /></button>}<button className="secondary" onClick={findWarmer}>Find warmer alternative <Thermometer size={17} /></button></div>
+          <div className="panel-actions"><button className="primary" onClick={() => setPlanOpen(true)}>View trip plan <Route size={17} /></button>{selected.bookingUrl ? <a className="secondary" href={selected.bookingUrl} target="_blank" rel="noreferrer">Check availability <ExternalLink size={17} /></a> : <button className="secondary" onClick={() => setToast("No verified booking link · confirm with the operator")}>Verify booking <ExternalLink size={17} /></button>}<button className="secondary" disabled={thinking} onClick={() => runScout("Find a genuinely warmer campground from the supplied candidates. Do not claim a temperature unless live weather data supports it; otherwise explain what must be verified.")}>Ask Scout for a warmer option <Thermometer size={17} /></button></div>
         </aside>
       </section>
 

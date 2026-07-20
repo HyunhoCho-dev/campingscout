@@ -34,6 +34,7 @@ export type WeatherSnapshot = {
   gustKph: number;
   fetchedAt: string;
   live: boolean;
+  provider?: string;
 };
 
 export type Preference = { wild: number; quiet: number };

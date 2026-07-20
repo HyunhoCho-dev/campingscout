@@ -15,6 +15,19 @@ export async function GET(request: NextRequest) {
   if (start && (daysAhead < -1 || daysAhead > 15)) return NextResponse.json({ error: "Selected dates are outside the reliable live forecast window", live: false }, { status: 422 });
 
   try {
+    return NextResponse.json(await fetchOpenMeteo(latitude, longitude, startDate, endDate, start, end));
+  } catch (openMeteoError) {
+    console.warn("Open-Meteo weather failed; trying MET Norway", openMeteoError);
+    try {
+      return NextResponse.json(await fetchMetNorway(latitude, longitude, start, end));
+    } catch (metError) {
+      console.error("All live weather providers failed", metError);
+      return NextResponse.json({ error: "Live weather temporarily unavailable" }, { status: 503 });
+    }
+  }
+}
+
+async function fetchOpenMeteo(latitude: number, longitude: number, startDate: string | null, endDate: string | null, start: Date | null, end: Date | null) {
     const url = new URL("https://api.open-meteo.com/v1/forecast");
     url.searchParams.set("latitude", String(latitude));
     url.searchParams.set("longitude", String(longitude));
@@ -27,8 +40,48 @@ export async function GET(request: NextRequest) {
     const response = await fetch(url, { next: { revalidate: 1800 } });
     if (!response.ok) throw new Error("Weather provider returned an error");
     const data = await response.json() as { daily: { temperature_2m_max: number[]; temperature_2m_min: number[]; precipitation_probability_max: number[]; wind_gusts_10m_max: number[] } };
-    return NextResponse.json({ highC: Math.round(Math.max(...data.daily.temperature_2m_max)), lowC: Math.round(Math.min(...data.daily.temperature_2m_min)), rainChance: Math.round(Math.max(...data.daily.precipitation_probability_max)), gustKph: Math.round(Math.max(...data.daily.wind_gusts_10m_max)), fetchedAt: new Date().toISOString(), live: true });
-  } catch {
-    return NextResponse.json({ error: "Live weather temporarily unavailable" }, { status: 503 });
-  }
+    return { highC: Math.round(Math.max(...data.daily.temperature_2m_max)), lowC: Math.round(Math.min(...data.daily.temperature_2m_min)), rainChance: Math.round(Math.max(...data.daily.precipitation_probability_max)), gustKph: Math.round(Math.max(...data.daily.wind_gusts_10m_max)), fetchedAt: new Date().toISOString(), live: true, provider: "Open-Meteo" };
+}
+
+type MetPeriod = {
+  time: string;
+  data: {
+    instant: { details: { air_temperature?: number; wind_speed?: number; wind_speed_of_gust?: number } };
+    next_1_hours?: { details?: { precipitation_amount?: number; probability_of_precipitation?: number } };
+    next_6_hours?: { details?: { precipitation_amount?: number; probability_of_precipitation?: number } };
+  };
+};
+
+async function fetchMetNorway(latitude: number, longitude: number, start: Date | null, end: Date | null) {
+  const url = new URL("https://api.met.no/weatherapi/locationforecast/2.0/compact");
+  url.searchParams.set("lat", latitude.toFixed(4));
+  url.searchParams.set("lon", longitude.toFixed(4));
+  const response = await fetch(url, {
+    headers: { "User-Agent": "CampingScout/1.0 https://campingscout-wild.hyunhocho123.chatgpt.site" },
+    next: { revalidate: 1800 },
+  });
+  if (!response.ok) throw new Error(`MET Norway returned ${response.status}`);
+  const data = await response.json() as { properties?: { timeseries?: MetPeriod[] } };
+  const now = Date.now();
+  const windowStart = start ? Math.max(start.getTime(), now - 3_600_000) : now - 3_600_000;
+  const windowEnd = end ? Math.min(end.getTime() + 86_400_000, now + 9 * 86_400_000) : now + 72 * 3_600_000;
+  const periods = (data.properties?.timeseries || []).filter((period) => {
+    const time = Date.parse(period.time);
+    return time >= windowStart && time < windowEnd;
+  });
+  if (!periods.length) throw new Error("MET Norway returned no periods for the selected dates");
+  const temperatures = periods.map((period) => period.data.instant.details.air_temperature).filter((value): value is number => Number.isFinite(value));
+  const gusts = periods.map((period) => period.data.instant.details.wind_speed_of_gust ?? period.data.instant.details.wind_speed).filter((value): value is number => Number.isFinite(value));
+  const rainProbabilities = periods.map((period) => period.data.next_1_hours?.details?.probability_of_precipitation ?? period.data.next_6_hours?.details?.probability_of_precipitation).filter((value): value is number => Number.isFinite(value));
+  const precipitation = periods.map((period) => period.data.next_1_hours?.details?.precipitation_amount ?? period.data.next_6_hours?.details?.precipitation_amount ?? 0);
+  if (!temperatures.length) throw new Error("MET Norway response did not include temperatures");
+  return {
+    highC: Math.round(Math.max(...temperatures)),
+    lowC: Math.round(Math.min(...temperatures)),
+    rainChance: rainProbabilities.length ? Math.round(Math.max(...rainProbabilities)) : (Math.max(...precipitation) > 0 ? 100 : 0),
+    gustKph: gusts.length ? Math.round(Math.max(...gusts) * 3.6) : 0,
+    fetchedAt: new Date().toISOString(),
+    live: true,
+    provider: "MET Norway",
+  };
 }
