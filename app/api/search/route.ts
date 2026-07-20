@@ -20,7 +20,6 @@ type SearchIntent = {
 export async function POST(request: NextRequest) {
   const payload = await request.json() as Record<string, unknown> & {
     command?: unknown;
-    language?: unknown;
     searchArea?: unknown;
     trip?: { origin?: unknown; maxDriveMinutes?: unknown; budget?: unknown; startDate?: unknown; endDate?: unknown; scope?: unknown };
     preference?: { quiet?: unknown; wild?: unknown };
@@ -36,18 +35,14 @@ export async function POST(request: NextRequest) {
     const preliminaryRadius = Math.min(200000, Math.max(50000, preliminaryDrive * 1300));
     const polygon = validPolygon(payload.searchArea) ? payload.searchArea : undefined;
     const nationwide = payload.trip?.scope === "nationwide" && !polygon;
-    const requestedLanguage = payload.language === "en" ? "English" : "Korean";
-    const [rawIntent, factual] = await Promise.all([completeJson(client, [
-      { role: "system", content: "You are CamperLife's search controller. Translate the traveler, profile, trip settings, map area, and request into strict JSON search constraints. Do not invent facts." },
-      { role: "user", content: `Return JSON with querySummary, quiet (0-100), wild (0-100), maxDriveMinutes (15-240), budget (KRW integer), dogFriendly (boolean), requiredFacilities (string array). Preserve every explicit user-selected value unless the request changes it. Infer dogFriendly from the party/profile when a dog is present. The response language must be ${requestedLanguage}. Input:\n${JSON.stringify(payload)}` },
-    ]), searchCampgrounds(origin[1], origin[0], preliminaryRadius, { nationwide, polygon })]);
-    const intent = validateIntent(rawIntent, payload);
+    const factual = await searchCampgrounds(origin[1], origin[0], preliminaryRadius, { nationwide, polygon });
+    const intent = intentFromInput(payload);
     if (!factual.camps.length) return NextResponse.json({ error: "No live campground records were found for this search area", source: factual.source }, { status: 404 });
 
-    const routed = await enrichRoutes(origin, nationwide ? geographicallyDiverse(factual.camps, 60) : factual.camps.slice(0, 60));
+    const routed = await enrichRoutes(origin, nationwide ? geographicallyDiverse(factual.camps, 24) : factual.camps.slice(0, 24));
     const withinDrive = routed.filter((camp) => !camp.driveMinutes || camp.driveMinutes <= intent.maxDriveMinutes + 15);
-    const candidates = (withinDrive.length >= 8 ? withinDrive : routed).slice(0, 40);
-    const weatherEnriched = await enrichWeather(candidates, String(payload.trip?.startDate || ""), String(payload.trip?.endDate || ""));
+    const candidates = (withinDrive.length >= 8 ? withinDrive : routed).slice(0, 24);
+    const weatherEnriched = forecastIsAvailable(String(payload.trip?.startDate || "")) ? await enrichWeather(candidates, String(payload.trip?.startDate || ""), String(payload.trip?.endDate || "")) : candidates;
     const candidateFacts = weatherEnriched.map((camp) => ({
       id: camp.id, name: camp.name, area: camp.area, landscape: camp.landscape,
       driveMinutes: camp.driveMinutes || null, distanceKm: camp.distanceKm || null, price: camp.price || null,
@@ -56,14 +51,14 @@ export async function POST(request: NextRequest) {
       dataCompleteness: (camp.name && !/^Campground \d+$/i.test(camp.name) ? 1 : 0) + (camp.area !== "Korea" ? 1 : 0) + (camp.facilities[0] !== "Verify facilities" ? 1 : 0) + (camp.bookingUrl ? 1 : 0) + (camp.dogFriendly !== null ? 1 : 0),
     }));
     const rawPlan = await completeJson(client, [
-      { role: "system", content: `You are CamperLife, an evidence-aware camping search ranker. Use only the supplied live candidates, road metrics, weather, profile, map area, and trip facts. Never invent policies, prices, availability, facilities, weather, or routes. Unknown pet policy is not proof of dog friendliness. Respond in ${requestedLanguage}.` },
+      { role: "system", content: "You are CamperLife, an evidence-aware camping search ranker. Use only supplied live candidates, road metrics, weather, profile, map area, and trip facts. Never invent facts. Unknown pet policy is not proof of dog friendliness. Respond only in English." },
       { role: "user", content: `Rank the factual candidates for this exact traveler and build a trip plan. Return strict JSON with summary, changes (2-5 strings), packing (3-8 strings), search (the supplied intent fields), rankedCampIds (candidate IDs only, best first), recommendations (top 12 objects: id, score 0-100, reason, tradeoff, quiet 0-100, wild 0-100), and itinerary (3-6 objects: time, title, detail). Make every explanation traceable to supplied facts and say what needs operator verification. Strongly prefer identifiable operator records with higher dataCompleteness; do not rank an anonymous, oddly named, or unverifiable record above a complete record merely because it is closer.\nSearch intent:${JSON.stringify(intent)}\nTraveler input:${JSON.stringify(payload)}\nLive candidate facts:${JSON.stringify(candidateFacts)}` },
     ]);
     const plan = validateSearchPlan(rawPlan, intent, new Set(weatherEnriched.map((camp) => camp.id)));
     const topCamp = plan.rankedCampIds?.length ? weatherEnriched.find((camp) => camp.id === plan.rankedCampIds![0]) : undefined;
     const nearby = topCamp ? await fetchNearbyPlaces(topCamp.coordinates) : [];
     const finalPlan = nearby.length && topCamp ? applyRoutePlan(plan, await completeJson(client, [
-      { role: "system", content: `You are CamperLife's route itinerary planner. Select only supplied real place IDs. Build a practical route from the user's departure through a small number of worthwhile attractions/restaurants and finally the chosen campground. Use the user's profile, dates, party, budget, language, and preferences. Never invent places or facts. Respond in ${requestedLanguage}.` },
+      { role: "system", content: "You are CamperLife's route itinerary planner. Select only supplied real place IDs. Build a practical route from the departure through a few worthwhile attractions/restaurants and finally the chosen campground. Use the profile, dates, party, budget and preferences. Never invent places or facts. Respond only in English." },
       { role: "user", content: `Return strict JSON with summary, packing (3-8 strings), itinerary (4-8 objects with time,title,detail), and routeStopIds (0-5 supplied place IDs in visit order). Avoid excessive detours and normally include at most one restaurant. User input:${JSON.stringify(payload)}\nChosen campground:${JSON.stringify(candidateFacts.find((camp) => camp.id === topCamp.id))}\nLive nearby places:${JSON.stringify(nearby)}` },
     ]), nearby) : plan;
     const recommendationMap = new Map(finalPlan.recommendations?.map((item) => [item.id, item]) || []);
@@ -100,7 +95,7 @@ type NearbyPlace = { id: string; type: "attraction" | "restaurant"; name: string
 async function fetchNearbyPlaces([longitude, latitude]: [number, number]): Promise<NearbyPlace[]> {
   const query = `[out:json][timeout:16];(nwr(around:18000,${latitude},${longitude})["tourism"~"attraction|museum|viewpoint|theme_park|zoo|gallery"]["name"];nwr(around:12000,${latitude},${longitude})["amenity"="restaurant"]["name"];);out tags center qt 70;`;
   try {
-    const response = await fetch("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" }, body: new URLSearchParams({ data: query }), signal: AbortSignal.timeout(19000) });
+    const response = await fetch("https://overpass.kumi.systems/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" }, body: new URLSearchParams({ data: query }), signal: AbortSignal.timeout(9000) });
     if (!response.ok) return []; const data = await response.json() as { elements?: Array<{ type: string; id: number; lat?: number; lon?: number; center?: { lat?: number; lon?: number }; tags?: Record<string, string> }> };
     return (data.elements || []).flatMap((item) => {
       const lat = item.lat ?? item.center?.lat; const lon = item.lon ?? item.center?.lon; const tags = item.tags || {}; if (!Number.isFinite(lat) || !Number.isFinite(lon) || !tags.name) return [];
@@ -119,10 +114,10 @@ function applyRoutePlan(plan: Omit<PlanResponse, "source" | "model">, value: unk
 }
 
 async function completeJson(client: OpenAI, messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]) {
-  let completion = await client.chat.completions.create({ model: MODEL, messages, response_format: { type: "json_object" }, temperature: 0.15, max_tokens: 2600 });
+  let completion = await client.chat.completions.create({ model: MODEL, messages, response_format: { type: "json_object" }, temperature: 0.15, max_tokens: 1800 });
   let content = completion.choices[0]?.message?.content || "";
   try { return parseJson(content); } catch {
-    completion = await client.chat.completions.create({ model: MODEL, messages: [...messages, { role: "assistant", content }, { role: "user", content: "Return the same result again as one complete strict JSON object only. No markdown or reasoning." }], response_format: { type: "json_object" }, temperature: 0, max_tokens: 3200 });
+    completion = await client.chat.completions.create({ model: MODEL, messages: [...messages, { role: "assistant", content }, { role: "user", content: "Return the same result again as one complete strict JSON object only. No markdown or reasoning." }], response_format: { type: "json_object" }, temperature: 0, max_tokens: 2200 });
     content = completion.choices[0]?.message?.content || "";
     return parseJson(content);
   }
@@ -144,10 +139,8 @@ async function enrichRoutes(origin: [number, number], camps: Campground[]) {
 
 async function enrichWeather(camps: Campground[], startDate: string, endDate: string) {
   const targets = camps.slice(0, 9); const enriched: Campground[] = [];
-  for (let index = 0; index < targets.length; index += 3) {
-    enriched.push(...await Promise.all(targets.slice(index, index + 3).map((camp) => fetchMetCampWeather(camp, startDate, endDate))));
-  }
-  return [...enriched, ...camps.slice(9)];
+  enriched.push(...await Promise.all(targets.slice(0, 6).map((camp) => fetchMetCampWeather(camp, startDate, endDate))));
+  return [...enriched, ...camps.slice(6)];
 }
 
 async function fetchMetCampWeather(camp: Campground, startDate: string, endDate: string) {
@@ -168,9 +161,10 @@ async function fetchMetCampWeather(camp: Campground, startDate: string, endDate:
   } catch { return camp; }
 }
 
-function validateIntent(value: unknown, payload: { trip?: { maxDriveMinutes?: unknown; budget?: unknown }; preference?: { quiet?: unknown; wild?: unknown } }): SearchIntent {
-  if (!value || typeof value !== "object") throw new Error("AI search intent was not valid"); const item = value as Record<string, unknown>;
-  return { querySummary: String(item.querySummary || "Personalized campground search").slice(0, 300), quiet: clamp(item.quiet, 0, 100, Number(payload.preference?.quiet) || 50), wild: clamp(item.wild, 0, 100, Number(payload.preference?.wild) || 50), maxDriveMinutes: clamp(item.maxDriveMinutes, 15, 240, Number(payload.trip?.maxDriveMinutes) || 120), budget: clamp(item.budget, 0, 10_000_000, Number(payload.trip?.budget) || 200000), dogFriendly: Boolean(item.dogFriendly), requiredFacilities: Array.isArray(item.requiredFacilities) ? item.requiredFacilities.filter((entry): entry is string => typeof entry === "string").slice(0, 8) : [] };
+function intentFromInput(payload: Record<string, unknown> & { trip?: { maxDriveMinutes?: unknown; budget?: unknown }; preference?: { quiet?: unknown; wild?: unknown } }): SearchIntent {
+  const profile = payload.profile && typeof payload.profile === "object" ? payload.profile as Record<string, unknown> : {};
+  const party = String(profile.party || ""); const facilities = Array.isArray(profile.facilities) ? profile.facilities.filter((entry): entry is string => typeof entry === "string").slice(0, 8) : [];
+  return { querySummary: String(payload.command || "Personalized campground search").slice(0, 300), quiet: clamp(payload.preference?.quiet, 0, 100, 50), wild: clamp(payload.preference?.wild, 0, 100, 50), maxDriveMinutes: clamp(payload.trip?.maxDriveMinutes, 15, 240, 120), budget: clamp(payload.trip?.budget, 0, 10_000_000, 200000), dogFriendly: /\bdog\b/i.test(party), requiredFacilities: facilities };
 }
 
 function validateSearchPlan(value: unknown, intent: SearchIntent, validIds: Set<string>): Omit<PlanResponse, "source" | "model"> {
@@ -186,6 +180,7 @@ function parseJson(content: string) { const cleaned = content.trim().replace(/^`
 function clamp(value: unknown, min: number, max: number, fallback: number) { const number = Number(value); return Number.isFinite(number) ? Math.round(Math.max(min, Math.min(max, number))) : fallback; }
 function validCoordinate(value: unknown): value is [number, number] { return Array.isArray(value) && value.length === 2 && Number.isFinite(value[0]) && Number.isFinite(value[1]) && Math.abs(value[0]) <= 180 && Math.abs(value[1]) <= 90; }
 function validPolygon(value: unknown): value is [number, number][] { return Array.isArray(value) && value.length >= 3 && value.length <= 30 && value.every(validCoordinate); }
+function forecastIsAvailable(startDate: string) { const start = /^\d{4}-\d{2}-\d{2}$/.test(startDate) ? Date.parse(`${startDate}T00:00:00+09:00`) : Date.now(); const days = (start - Date.now()) / 86_400_000; return days >= -1 && days <= 9; }
 function geographicallyDiverse(camps: Campground[], limit: number) {
   const buckets = new Map<string, Campground[]>(); camps.forEach((camp) => { const key = `${Math.floor(camp.coordinates[1] * 2)}:${Math.floor(camp.coordinates[0] * 2)}`; buckets.set(key, [...(buckets.get(key) || []), camp]); });
   const groups = [...buckets.values()]; const result: Campground[] = []; let index = 0;

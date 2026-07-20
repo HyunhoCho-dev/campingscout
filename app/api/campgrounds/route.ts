@@ -3,6 +3,7 @@ import type { Campground } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 type SearchAreaOptions = { nationwide?: boolean; polygon?: [number, number][] };
+let nationwideCache: { camps: Campground[]; source: string; expiresAt: number } | null = null;
 
 export async function GET(request: NextRequest) {
   const latitude = clamp(Number(request.nextUrl.searchParams.get("latitude")) || 37.5665, -90, 90);
@@ -19,6 +20,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function searchCampgrounds(latitude: number, longitude: number, radius: number, options: SearchAreaOptions = {}) {
+  if (options.nationwide && !options.polygon?.length && nationwideCache?.expiresAt && nationwideCache.expiresAt > Date.now()) {
+    return { camps: rebaseDistances(nationwideCache.camps, latitude, longitude), source: `${nationwideCache.source} · cached`, live: true };
+  }
   const jobs: Promise<{ camps: Campground[]; source: string }>[] = [
     fetchOverpass(latitude, longitude, Math.min(radius, 200000), options).then((camps) => ({ camps, source: "OpenStreetMap Overpass" })),
   ];
@@ -27,7 +31,9 @@ export async function searchCampgrounds(latitude: number, longitude: number, rad
   const successful = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
   if (!successful.length) {
     const photon = options.nationwide ? await fetchPhotonNationwide() : await fetchPhoton(latitude, longitude, Math.min(radius, 120000));
-    return { camps: photon, source: `OpenStreetMap via Photon · ${options.nationwide ? "nationwide " : ""}live fallback`, live: true };
+    const source = `OpenStreetMap via Photon · ${options.nationwide ? "nationwide " : ""}live fallback`;
+    if (options.nationwide && photon.length) nationwideCache = { camps: photon, source, expiresAt: Date.now() + 15 * 60_000 };
+    return { camps: photon, source, live: true };
   }
   const unique = new Map<string, Campground>();
   successful.flatMap((result) => result.camps).forEach((camp) => {
@@ -36,7 +42,9 @@ export async function searchCampgrounds(latitude: number, longitude: number, rad
   });
   const all = [...unique.values()];
   const camps = options.nationwide ? geographicallyDiverse(all, 180) : all.sort((a, b) => a.distanceKm - b.distanceKm).slice(0, options.polygon?.length ? 160 : 80);
-  return { camps, source: `${successful.map((item) => item.source).join(" + ")} · live factual records`, live: true };
+  const source = `${successful.map((item) => item.source).join(" + ")} · live factual records`;
+  if (options.nationwide && camps.length) nationwideCache = { camps, source, expiresAt: Date.now() + 15 * 60_000 };
+  return { camps, source, live: true };
 }
 
 async function fetchGoCamping(latitude: number, longitude: number, radius: number, serviceKey: string) {
@@ -55,23 +63,21 @@ async function fetchOverpass(latitude: number, longitude: number, radius: number
     : options.nationwide
       ? `area["ISO3166-1"="KR"][boundary="administrative"]->.country;nwr(area.country)["tourism"="camp_site"];`
       : `nwr(around:${Math.round(radius)},${latitude},${longitude})["tourism"="camp_site"];`;
-  const query = `[out:json][timeout:25];${selector}out tags center qt ${options.nationwide ? 700 : 240};`;
+  const query = `[out:json][timeout:14];${selector}out tags center qt ${options.nationwide ? 500 : 180};`;
   const endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
-  let lastError: unknown;
-  for (const endpoint of endpoints) {
-    try {
+  try {
+    return await Promise.any(endpoints.map(async (endpoint) => {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "CamperLife/1.0" },
         body: new URLSearchParams({ data: query }),
-        signal: AbortSignal.timeout(26000),
+        signal: AbortSignal.timeout(15000),
       });
       if (!response.ok) throw new Error(`Overpass returned ${response.status}`);
       const payload = await response.json() as { elements?: OverpassElement[] };
       return (payload.elements || []).map((item, index) => normalizeOverpass(item, index, latitude, longitude)).filter((camp): camp is Campground => Boolean(camp));
-    } catch (error) { lastError = error; }
-  }
-  throw lastError instanceof Error ? lastError : new Error("Overpass unavailable");
+    }));
+  } catch { throw new Error("Overpass unavailable"); }
 }
 
 async function fetchPhoton(latitude: number, longitude: number, radius: number) {
@@ -171,3 +177,4 @@ function geographicallyDiverse(camps: Campground[], limit: number) {
   while (result.length < limit && groups.some((group) => index < group.length)) { for (const group of groups) if (group[index] && result.length < limit) result.push(group[index]); index += 1; }
   return result;
 }
+function rebaseDistances(camps: Campground[], latitude: number, longitude: number) { return camps.map((camp) => ({ ...camp, distanceKm: Math.round(haversine(latitude, longitude, camp.coordinates[1], camp.coordinates[0])) })); }

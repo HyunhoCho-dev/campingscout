@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { LineString, Polygon } from "geojson";
 import {
   AlertTriangle, Backpack, CalendarDays, Car, Check, ChevronDown, CloudSun,
-  Compass, Globe2, Heart, Info, LocateFixed, MapPin, Navigation, Pencil, Search,
+  Compass, Heart, Info, LocateFixed, MapPin, Navigation, Pencil, Search,
   ExternalLink, KeyRound, LogIn, LogOut, PawPrint, Route, Save, Share2, ShieldCheck, ShowerHead,
   SlidersHorizontal, Sparkles, TentTree, Thermometer, Users, WalletCards, X,
 } from "lucide-react";
@@ -44,7 +44,7 @@ function getUpcomingWeekend() {
 export function ScoutDashboard() {
   const [camps, setCamps] = useState<Campground[]>(campgrounds);
   const [selected, setSelected] = useState(campgrounds[0]);
-  const [preference, setPreference] = useState<Preference>(() => readStored("campingscout-preference", { wild: 72, quiet: 82 }));
+  const [preference, setPreference] = useState<Preference>({ wild: 72, quiet: 82 });
   const [pinned, setPinned] = useState<string[]>([campgrounds[0].id]);
   const [weather, setWeather] = useState<WeatherSnapshot | null>(null);
   const [planOpen, setPlanOpen] = useState(false);
@@ -52,15 +52,15 @@ export function ScoutDashboard() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
-  const [openRouterKey, setOpenRouterKey] = useState(() => typeof window === "undefined" ? "" : window.sessionStorage.getItem("campingscout-openrouter-key") || "");
+  const [openRouterKey, setOpenRouterKey] = useState("");
   const [aiConnected, setAiConnected] = useState(false);
   const [aiManaged, setAiManaged] = useState(false);
-  const [profile, setProfile] = useState<CamperProfile>(() => readStored("campingscout-profile", defaultProfile));
-  const [trip, setTrip] = useState<TripSettings>(() => ({ ...defaultTrip, ...readStored("campingscout-trip", defaultTrip) }));
-  const [language, setLanguage] = useState<"ko" | "en">(() => readStored("camperlife-language", "ko"));
-  const [searchArea, setSearchArea] = useState<[number, number][] | null>(() => readStored("camperlife-search-area", null));
+  const [profile, setProfile] = useState<CamperProfile>(defaultProfile);
+  const [trip, setTrip] = useState<TripSettings>(defaultTrip);
+  const [searchArea, setSearchArea] = useState<[number, number][] | null>(null);
+  const [storageReady, setStorageReady] = useState(false);
   const [drawMode, setDrawMode] = useState(false);
-  const initialTrip = useRef(trip);
+  const initialLoadDone = useRef(false);
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [navigation, setNavigation] = useState<NavigationData | null>(null);
   const [dataSource, setDataSource] = useState("Loading real campground data…");
@@ -88,15 +88,28 @@ export function ScoutDashboard() {
   }, [aiFilters, aiRankedIds, camps, preference]);
 
   useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setPreference(readStored("campingscout-preference", { wild: 72, quiet: 82 }));
+      setProfile(readStored("campingscout-profile", defaultProfile));
+      setTrip({ ...defaultTrip, ...readStored("campingscout-trip", defaultTrip) });
+      setSearchArea(readStored("camperlife-search-area", null));
+      setOpenRouterKey(window.sessionStorage.getItem("campingscout-openrouter-key") || "");
+      setStorageReady(true);
+    });
     fetch("/api/session").then(async (r) => await r.json() as SessionInfo).then((value) => {
       setSession(value);
       if (value.user) fetch("/api/profile").then(async (r) => r.ok ? await r.json() as { profile: CamperProfile | null } : null).then((body) => { if (body?.profile) setProfile(body.profile); });
     }).catch(() => undefined);
     fetch("/api/health").then(async (r) => await r.json() as { integrations?: { openrouter?: boolean } }).then((value) => { if (value.integrations?.openrouter) { setAiManaged(true); setAiConnected(true); } }).catch(() => undefined);
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
-    const seedTrip = initialTrip.current; const [longitude, latitude] = seedTrip.origin;
+    if (!storageReady || initialLoadDone.current) return;
+    initialLoadDone.current = true;
+    const seedTrip = trip; const [longitude, latitude] = seedTrip.origin;
     fetch(`/api/campgrounds?latitude=${latitude}&longitude=${longitude}&radius=${Math.max(50000, seedTrip.maxDriveMinutes * 1300)}&nationwide=${seedTrip.scope === "nationwide"}`, { cache: "no-store" })
       .then(async (response) => response.ok ? await response.json() as { camps: Campground[]; source: string; live: boolean } : Promise.reject())
       .then((result) => {
@@ -104,7 +117,7 @@ export function ScoutDashboard() {
         setCamps(result.camps); setSelected(result.camps[0]); setPinned([result.camps[0].id]);
         setMapCardOpen(true); setDataSource(result.source);
       }).catch(() => setDataSource("Live data unavailable · current cards are placeholders"));
-  }, []);
+  }, [storageReady, trip]);
 
   useEffect(() => {
     fetch("/api/navigation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ origin: trip.origin, destination: selected.coordinates, waypoints: aiPlan?.routeStops?.slice(0, 5).map((stop) => stop.coordinates) || [], minutes: trip.maxDriveMinutes }) })
@@ -127,11 +140,10 @@ export function ScoutDashboard() {
     return () => { active = false; };
   }, [selected, trip.startDate, trip.endDate]);
 
-  useEffect(() => { window.localStorage.setItem("campingscout-preference", JSON.stringify(preference)); }, [preference]);
-  useEffect(() => { window.localStorage.setItem("campingscout-profile", JSON.stringify(profile)); }, [profile]);
-  useEffect(() => { window.localStorage.setItem("campingscout-trip", JSON.stringify(trip)); }, [trip]);
-  useEffect(() => { window.localStorage.setItem("camperlife-language", JSON.stringify(language)); }, [language]);
-  useEffect(() => { window.localStorage.setItem("camperlife-search-area", JSON.stringify(searchArea)); }, [searchArea]);
+  useEffect(() => { if (storageReady) window.localStorage.setItem("campingscout-preference", JSON.stringify(preference)); }, [preference, storageReady]);
+  useEffect(() => { if (storageReady) window.localStorage.setItem("campingscout-profile", JSON.stringify(profile)); }, [profile, storageReady]);
+  useEffect(() => { if (storageReady) window.localStorage.setItem("campingscout-trip", JSON.stringify(trip)); }, [trip, storageReady]);
+  useEffect(() => { if (storageReady) window.localStorage.setItem("camperlife-search-area", JSON.stringify(searchArea)); }, [searchArea, storageReady]);
 
   const lowC = weather?.lowC ?? selected.lowC;
   const gearMismatch = lowC !== 0 && lowC < profile.sleepingBagComfortC;
@@ -157,7 +169,7 @@ export function ScoutDashboard() {
       const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(openRouterKey ? { "X-OpenRouter-Key": openRouterKey } : {}) },
-        body: JSON.stringify({ command: prompt, preference, profile, trip: searchTrip, language, searchArea: searchTrip.scope === "drawn" ? searchArea : null, user: session?.user ? { displayName: session.user.displayName } : null }),
+        body: JSON.stringify({ command: prompt, preference, profile, trip: searchTrip, searchArea: searchTrip.scope === "drawn" ? searchArea : null, user: session?.user ? { displayName: session.user.displayName } : null }),
       });
       const result = await response.json() as { camps?: Campground[]; plan?: PlanResponse; source?: string; counts?: { discovered: number; routed: number; weather: number; ranked: number; places?: number }; error?: string };
       if (!response.ok || result.error) throw new Error(result.error || "AI planning failed");
@@ -192,7 +204,7 @@ export function ScoutDashboard() {
 
   function acceptSearchArea(area: [number, number][]) {
     setSearchArea(area); setTrip((value) => ({ ...value, scope: "drawn" })); setDrawMode(false);
-    setToast(language === "ko" ? "검색 영역이 저장됐습니다. 검색 버튼을 눌러 AI 추천을 갱신하세요." : "Area saved. Press Search to refresh AI recommendations.");
+    setToast("Area saved. Press Search to refresh AI recommendations.");
   }
 
   async function connectOpenRouter(key: string) {
@@ -245,7 +257,7 @@ export function ScoutDashboard() {
           <button onClick={() => setSettingsOpen(true)}><Users size={18} /><span>{trip.travelers} travelers</span><ChevronDown size={15} /></button>
           <button onClick={() => setSettingsOpen(true)}><WalletCards size={18} /><span>₩{money.format(trip.budget)}</span><ChevronDown size={15} /></button>
         </div>
-        <div className="top-actions"><label className="language-control" aria-label="Language"><Globe2 size={17} /><select value={language} onChange={(event) => setLanguage(event.target.value as "ko" | "en")}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="top-search" disabled={thinking} onClick={() => runScout(language === "ko" ? "현재 선택된 출발지, 날짜, 인원, 예산, 프로필, 선호도와 지도 검색 영역을 모두 반영해 다시 검색하고 여행 경로를 생성해줘." : "Search again using every current origin, date, party, budget, profile, preference and drawn-area selection, then rebuild the route.")} aria-label="Search again with current conditions">{thinking ? <span className="spinner" /> : <Search size={19} />}</button><button className={aiConnected ? "ai-key ai-key--connected" : "ai-key"} onClick={() => setAiSettingsOpen(true)} aria-label="Configure OpenRouter AI"><KeyRound size={19} /><i /></button>{session?.user ? <><button className="avatar" onClick={() => setProfileOpen(true)} aria-label="Open profile">{session.user.displayName.slice(0, 2).toUpperCase()}</button><a href={session.signOutUrl} aria-label="Sign out"><LogOut size={18} /></a></> : <a href={session?.signInUrl || "/signin-with-chatgpt"} className="sign-in" aria-label="Sign in with ChatGPT"><LogIn size={18} /></a>}</div>
+        <div className="top-actions"><button className="top-search" disabled={thinking} onClick={() => runScout("Search again using every current origin, date, party, budget, profile, preference and drawn-area selection, then rebuild the route.")} aria-label="Search again with current conditions">{thinking ? <span className="spinner" /> : <Search size={19} />}</button><button className={aiConnected ? "ai-key ai-key--connected" : "ai-key"} onClick={() => setAiSettingsOpen(true)} aria-label="Configure OpenRouter AI"><KeyRound size={19} /><i /></button>{session?.user ? <><button className="avatar" onClick={() => setProfileOpen(true)} aria-label="Open profile">{session.user.displayName.slice(0, 2).toUpperCase()}</button><a href={session.signOutUrl} aria-label="Sign out"><LogOut size={18} /></a></> : <a href={session?.signInUrl || "/signin-with-chatgpt"} className="sign-in" aria-label="Sign in with ChatGPT"><LogIn size={18} /></a>}</div>
       </header>
 
       <section className="workspace">
@@ -273,7 +285,7 @@ export function ScoutDashboard() {
           <CampMap camps={visibleCamps} selected={selected} onSelect={chooseCamp} route={navigation?.route} reach={navigation?.reach} origin={trip.origin} stops={aiPlan?.routeStops} drawMode={drawMode} searchArea={searchArea} onAreaChange={acceptSearchArea} />
           <div className="reach-legend"><span className="reach-swatch" /><span><strong>Selected road route</strong><small>{navigation?.live ? `live ${navigation.source}` : "Calculating actual route…"}</small></span></div>
           <button className="locate-button" aria-label="Center on my location"><LocateFixed size={19} /></button>
-          <button className={drawMode ? "draw-area-button draw-area-button--active" : "draw-area-button"} onClick={() => setDrawMode((value) => !value)} aria-pressed={drawMode}><Pencil size={17} />{drawMode ? (language === "ko" ? "지도에서 3곳 이상 클릭 · 더블클릭으로 완료" : "Click 3+ points · double-click to finish") : (language === "ko" ? "지도 영역 지정" : "Draw search area")}</button>
+          <button className={drawMode ? "draw-area-button draw-area-button--active" : "draw-area-button"} onClick={() => setDrawMode((value) => !value)} aria-pressed={drawMode}><Pencil size={17} />{drawMode ? "Click 3+ points · double-click to finish" : "Draw search area"}</button>
           {mapCardOpen && <div className="selected-map-card">
             <div className={selected.image ? "selected-map-photo" : "selected-map-photo photo-missing"} style={selected.image ? { backgroundImage: `url(${selected.image})` } : undefined}>{!selected.image && <TentTree size={28} />}</div>
             <div><span className="tag">{labelForStatus(selected.status)}</span><strong>{selected.name}</strong><small>{selected.landscape}</small><div className="score-line"><b>{selected.score}</b><span>Suitability score</span></div></div>
@@ -372,10 +384,10 @@ function OpenRouterModal({ initialKey, connected, managed, onConnect, onDisconne
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState("");
   async function test() {
-    if (!key.trim()) { setError("OpenRouter API key를 입력하세요."); return; }
+    if (!key.trim()) { setError("Enter an OpenRouter API key."); return; }
     setTesting(true); setError("");
-    try { await onConnect(key.trim()); } catch (cause) { setError(cause instanceof Error ? cause.message : "연결하지 못했습니다."); }
+    try { await onConnect(key.trim()); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not connect."); }
     finally { setTesting(false); }
   }
-  return <div className="overlay overlay--center"><section className="profile-modal ai-modal" role="dialog" aria-modal="true" aria-label="OpenRouter connection"><div className="drawer-head"><div><span className="eyebrow">Live AI connection</span><h2>DeepSeek V4 Flash</h2></div><button className="icon-button" onClick={onClose} aria-label="Close AI settings"><X /></button></div><div className={connected ? "connection-state connection-state--ok" : "connection-state"}><span /><div><strong>{connected ? managed && !initialKey ? "Connected by deployment secret" : "Connected for this browser tab" : "Not connected"}</strong><small>Model: deepseek/deepseek-v4-flash</small></div></div><label className="key-field">Temporary OpenRouter API key (optional override)<input type="password" autoComplete="off" spellCheck={false} value={key} onChange={(event) => setKey(event.target.value)} placeholder="sk-or-v1-…" /></label><p className="privacy-note"><ShieldCheck size={16} /> 임시 키는 이 브라우저 탭에만 보관됩니다. 배포 키는 암호화된 서버 환경변수로 관리됩니다.</p>{error && <p className="inline-error" role="alert">{error}</p>}<button className="primary full" disabled={testing || !key.trim()} onClick={test}>{testing ? "Testing real API call…" : "Test temporary key"} <KeyRound size={17} /></button>{Boolean(initialKey) && <button className="secondary full" onClick={() => { onDisconnect(); onClose(); }}>Remove temporary key</button>}</section></div>;
+  return <div className="overlay overlay--center"><section className="profile-modal ai-modal" role="dialog" aria-modal="true" aria-label="OpenRouter connection"><div className="drawer-head"><div><span className="eyebrow">Live AI connection</span><h2>DeepSeek V4 Flash</h2></div><button className="icon-button" onClick={onClose} aria-label="Close AI settings"><X /></button></div><div className={connected ? "connection-state connection-state--ok" : "connection-state"}><span /><div><strong>{connected ? managed && !initialKey ? "Connected by deployment secret" : "Connected for this browser tab" : "Not connected"}</strong><small>Model: deepseek/deepseek-v4-flash</small></div></div><label className="key-field">Temporary OpenRouter API key (optional override)<input type="password" autoComplete="off" spellCheck={false} value={key} onChange={(event) => setKey(event.target.value)} placeholder="sk-or-v1-…" /></label><p className="privacy-note"><ShieldCheck size={16} /> The temporary key stays in this browser tab. The deployment key is stored as an encrypted server environment variable.</p>{error && <p className="inline-error" role="alert">{error}</p>}<button className="primary full" disabled={testing || !key.trim()} onClick={test}>{testing ? "Testing real API call…" : "Test temporary key"} <KeyRound size={17} /></button>{Boolean(initialKey) && <button className="secondary full" onClick={() => { onDisconnect(); onClose(); }}>Remove temporary key</button>}</section></div>;
 }

@@ -12,7 +12,10 @@ export async function GET(request: NextRequest) {
   const start = startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate) ? new Date(`${startDate}T00:00:00+09:00`) : null;
   const end = endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate) ? new Date(`${endDate}T00:00:00+09:00`) : start;
   const daysAhead = start ? Math.ceil((start.getTime() - Date.now()) / 86_400_000) : 0;
-  if (start && (daysAhead < -1 || daysAhead > 15)) return NextResponse.json({ error: "Selected dates are outside the reliable live forecast window", live: false }, { status: 422 });
+  if (start && (daysAhead < -1 || daysAhead > 15)) return NextResponse.json({
+    highC: 0, lowC: 0, rainChance: 0, gustKph: 0, fetchedAt: new Date().toISOString(), live: false,
+    provider: "Forecast available 15 days before departure",
+  }, { headers: { "Cache-Control": "public, max-age=3600" } });
 
   try {
     return NextResponse.json(await fetchOpenMeteo(latitude, longitude, startDate, endDate, start, end));
@@ -57,7 +60,7 @@ async function fetchMetNorway(latitude: number, longitude: number, start: Date |
   url.searchParams.set("lat", latitude.toFixed(4));
   url.searchParams.set("lon", longitude.toFixed(4));
   const response = await fetch(url, {
-    headers: { "User-Agent": "CampingScout/1.0 https://campingscout-wild.hyunhocho123.chatgpt.site" },
+    headers: { "User-Agent": "CamperLife/1.0 https://campingscout-wild.hyunhocho123.chatgpt.site" },
     next: { revalidate: 1800 },
   });
   if (!response.ok) throw new Error(`MET Norway returned ${response.status}`);
